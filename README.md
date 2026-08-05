@@ -68,8 +68,9 @@ As of **v0.1.0** this extension only ever *reads* the filesystem. The complete
 list of filesystem calls in the entire file is `os.walk`, `os.stat` and
 `os.lstat`. There is:
 
-- **no** `open()`, write, delete, rename, mkdir or chmod — nothing is created
-  on disk, not even a cache file (the cache is in RAM and dies with nautilus)
+- **no** `open()`, write, delete, rename, mkdir or chmod — this code creates
+  nothing on disk, not even a cache file (the size cache is in RAM and dies
+  with nautilus)
 - **no** network use of any kind — no sockets, no HTTP, no DNS
 - **no** subprocesses — no `subprocess`, `os.system`, `popen`, `exec*`, `fork`
 - imports limited to stdlib (`os`, `stat`, `queue`, `threading`,
@@ -77,6 +78,10 @@ list of filesystem calls in the entire file is `os.walk`, `os.stat` and
 
 It's a single ~300-line file with a header block stating the same thing, so
 you can audit it at a glance before trusting it with your filesystem.
+
+One honest caveat: CPython writes a `__pycache__/` bytecode directory next to
+the extension when Nautilus imports it, exactly as it does for every Python
+module. That's the interpreter, not this code, and it's safe to delete.
 
 > **This will change in v0.2.0.** Persistent (on-disk) caching is planned,
 > which means the extension *will* start writing one cache file under

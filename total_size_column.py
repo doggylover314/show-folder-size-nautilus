@@ -21,8 +21,11 @@ This extension is READ-ONLY with respect to your system:
 
   * Filesystem reads only.  The only filesystem calls used anywhere in this
     file are os.walk(), os.stat() and os.lstat().  There is no open(), no
-    write(), no unlink/rename/mkdir/chmod, and nothing is created on disk --
-    not even a cache file.  The cache lives in RAM and dies with nautilus.
+    write(), no unlink/rename/mkdir/chmod, and this code creates nothing on
+    disk -- not even a cache file.  The size cache lives in RAM and dies with
+    nautilus.  (CPython itself writes a __pycache__/ bytecode directory next
+    to this file when nautilus imports it, as it does for any Python module.
+    That is the interpreter, not this extension, and it is safe to delete.)
   * No network.  There is no socket, urllib, requests, http, or DNS use.
   * No subprocesses.  There is no os.system, subprocess, popen, exec*, or
     fork.  Nothing external is invoked.
