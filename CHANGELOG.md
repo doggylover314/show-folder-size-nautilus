@@ -102,10 +102,33 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path-keyed lookup.
 - Raised `CACHE_LIMIT` from 4096 to 20000 now that entries persist.
 
+## [0.4.0] - 2026-08-05
+
+### Added
+- **`total-size-index`**, a standalone command that pre-computes folder sizes
+  for whole drives and writes them into the cache the extension reads, so
+  browsing is instant from the first look instead of measuring on demand.
+  Run bare it lists mounted local filesystems and asks which to index;
+  `--all`, explicit paths, `--list` and `--dry-run` are also available.
+  - Walks **bottom-up in one pass**: each directory's total is its own files
+    plus its children's already-known totals, so every directory in a tree
+    gets a size for the cost of reading the tree once. Measuring each
+    directory independently would be quadratic.
+  - Does not cross mount points by default, so indexing `/` will not wander
+    onto an external drive (`--cross-mounts` allows it).
+  - Ctrl-C saves what was already measured rather than discarding it.
+  - Caps the cache at `--max-entries` (default 20000), keeping the largest
+    directories; small ones are near-instant to measure anyway.
+  - Imports the extension's own cache format and atomic write rather than
+    reimplementing them — two implementations of one file format is how they
+    drift apart.
+  - Verified to agree with `Gio.measure_disk_usage()` at every level of the
+    tree, not just at the roots.
+- The `.deb` installs it to `/usr/bin/total-size-index`.
+
 ## [Unreleased]
 
 ### Planned
-- Optional startup indexing of user-selected drives.
 - Verified support for GNOME 47 and newer.
 - C rewrite of the per-file callback is **not** planned on current evidence:
   measured at 3.4us per row, 68% of it the `os.lstat` a C module would also
@@ -175,7 +198,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.4.0
 [0.3.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.3.0
 [0.2.2]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.2
 [0.2.1]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.1

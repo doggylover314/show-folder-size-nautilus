@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+total-size-index -- pre-compute folder sizes for the Total Size column.
+
+WHAT IT DOES
+------------
+Walks the drives you choose and writes every directory's recursive size into
+the same cache the nautilus extension reads.  Afterwards, browsing those
+drives shows sizes instantly instead of measuring on demand.
+
+Run it with no arguments and it lists your mounted drives and asks which to
+index.  Or:
+
+    total-size-index --list              # show what it would offer, do nothing
+    total-size-index --all               # index every local drive, no prompt
+    total-size-index ~/Videos /mnt/data  # index specific paths
+    total-size-index --all --dry-run     # measure, report, write nothing
+
+SAFETY / AUDIT NOTES
+--------------------
+  * Reads with os.walk() and os.lstat().  Writes exactly one file: the same
+    size cache the extension uses (~/.cache/nautilus-total-size/sizes.json by
+    default), written atomically by the extension's own save function.
+    --dry-run writes nothing at all.
+  * No network, no subprocesses, nothing removed or modified on disk.
+  * Symlinks are never followed, so there are no loops and no tree is counted
+    twice.  Hard-linked files are counted once per run.
+  * By default it does not cross mount points -- indexing / will not wander
+    into an external drive.  Pass --cross-mounts to allow it.
+
+WHY ONE BOTTOM-UP PASS
+----------------------
+The obvious implementation -- measure each directory independently -- is
+quadratic: every level re-reads everything below it, so a tree ten deep is
+read ten times.  Instead this walks bottom-up once, and each directory's total
+is its own files plus the totals of its children, which are already known.
+Every directory in the tree gets a size for the cost of reading the tree once.
+"""
+
+import argparse
+import os
+import stat
+import sys
+import time
+
+# The cache format, its location and the atomic write all live in the
+# extension.  Import them rather than reimplement: two implementations of one
+# file format is how they drift apart.
+_SEARCH_PATHS = [
+    os.path.dirname(os.path.abspath(__file__)),
+    os.path.expanduser("~/.local/share/nautilus-python/extensions"),
+    "/usr/share/nautilus-python/extensions",
+]
+
+_extension = None
+for _candidate in _SEARCH_PATHS:
+    if os.path.exists(os.path.join(_candidate, "total_size_column.py")):
+        sys.path.insert(0, _candidate)
+        try:
+            import total_size_column as _extension
+        except Exception as _exc:            # pragma: no cover
+            print("error: found total_size_column.py in %s but could not "
+                  "import it: %r" % (_candidate, _exc), file=sys.stderr)
+            raise SystemExit(1)
+        break
+
+if _extension is None:
+    print("error: total_size_column.py not found. Looked in:\n  %s\n"
+          "Install the extension first (see INSTALL.md)."
+          % "\n  ".join(_SEARCH_PATHS), file=sys.stderr)
+    raise SystemExit(1)
+
+
+# Filesystems worth offering.  Everything else is either pseudo (proc, sysfs,
+# cgroup), or something you would not want to walk unprompted (network mounts).
+REAL_FILESYSTEMS = {
+    "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "jfs", "reiserfs",
+    "vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "zfs", "bcachefs",
+}
+
+
+def list_drives():
+    """Mounted local filesystems, as [(mountpoint, fstype, device)].
+
+    Reads /proc/self/mounts.  Kept deliberately dumb: no udisks, no dbus, no
+    subprocess -- this has to work in a plain terminal on any distro.
+    """
+    drives = []
+    seen = set()
+    try:
+        with open("/proc/self/mounts", "r", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                device, mount_point, fs_type = fields[0], fields[1], fields[2]
+                if fs_type not in REAL_FILESYSTEMS:
+                    continue
+                # /proc/mounts escapes spaces and friends as octal.
+                mount_point = mount_point.encode().decode("unicode_escape")
+                if mount_point in seen or not os.path.isdir(mount_point):
+                    continue
+                seen.add(mount_point)
+                drives.append((mount_point, fs_type, device))
+    except OSError as error:
+        print("warning: could not read /proc/self/mounts (%s)" % error,
+              file=sys.stderr)
+
+    drives.sort(key=lambda row: row[0])
+    return drives
+
+
+def index_tree(root, cross_mounts=False, on_progress=None):
+    """Return {directory: (mtime_ns, bytes)} for every directory under `root`.
+
+    One bottom-up pass: a directory's total is its own regular files plus the
+    already-computed totals of its subdirectories.  Symlinks are skipped
+    entirely (never followed, never counted), and hard links are counted once
+    per run.
+    """
+    sizes = {}
+    results = {}
+    seen_hardlinks = set()
+    scanned = 0
+
+    try:
+        root_device = os.lstat(root).st_dev
+    except OSError as error:
+        print("  skipping %s: %s" % (root, error), file=sys.stderr)
+        return results
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False,
+                                                followlinks=False):
+        total = 0
+
+        for name in filenames:
+            try:
+                info = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_nlink > 1:
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen_hardlinks:
+                    continue
+                seen_hardlinks.add(identity)
+            total += info.st_size
+
+        # Children were visited first (topdown=False), so their totals are
+        # known.  A missing child is a symlinked or skipped directory, which
+        # contributes nothing by design.
+        for name in dirnames:
+            total += sizes.pop(os.path.join(dirpath, name), 0)
+
+        try:
+            info = os.lstat(dirpath)
+        except OSError:
+            continue
+
+        if not cross_mounts and info.st_dev != root_device:
+            continue                      # different filesystem; leave it out
+
+        sizes[dirpath] = total
+        results[dirpath] = (info.st_mtime_ns, total)
+
+        scanned += 1
+        if on_progress is not None and scanned % 2000 == 0:
+            on_progress(scanned, dirpath)
+
+    return results
+
+
+def prompt_for_drives(drives):
+    """Ask which drives to index.  Returns a list of mount points."""
+    print("Drives found:\n")
+    for index, (mount_point, fs_type, device) in enumerate(drives, start=1):
+        print("  %2d) %-40s %-8s %s" % (index, mount_point, fs_type, device))
+    print("\n  a) all of them")
+    print("  q) quit without indexing\n")
+
+    try:
+        answer = input("Index which? (e.g. 1 3, or a): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return []
+
+    if not answer or answer == "q":
+        return []
+    if answer == "a":
+        return [row[0] for row in drives]
+
+    chosen = []
+    for token in answer.replace(",", " ").split():
+        try:
+            position = int(token)
+        except ValueError:
+            print("  ignoring %r: not a number" % token)
+            continue
+        if 1 <= position <= len(drives):
+            chosen.append(drives[position - 1][0])
+        else:
+            print("  ignoring %r: out of range" % token)
+    return chosen
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="total-size-index",
+        description="Pre-compute folder sizes for the nautilus Total Size "
+                    "column.",
+        epilog="With no arguments, lists your drives and asks which to index.",
+    )
+    parser.add_argument("paths", nargs="*",
+                        help="directories to index (default: ask)")
+    parser.add_argument("--all", action="store_true",
+                        help="index every local drive without asking")
+    parser.add_argument("--list", action="store_true",
+                        help="list the drives that would be offered, then exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="measure and report, but write nothing")
+    parser.add_argument("--cross-mounts", action="store_true",
+                        help="descend into other filesystems (default: don't)")
+    parser.add_argument("--max-entries", type=int,
+                        default=_extension.CACHE_LIMIT,
+                        help="cap the cache at this many directories, keeping "
+                             "the largest (default: %(default)s)")
+    args = parser.parse_args(argv)
+
+    drives = list_drives()
+
+    if args.list:
+        for mount_point, fs_type, device in drives:
+            print("%-40s %-8s %s" % (mount_point, fs_type, device))
+        return 0
+
+    if args.paths:
+        targets = [os.path.abspath(os.path.expanduser(p)) for p in args.paths]
+    elif args.all:
+        targets = [row[0] for row in drives]
+    else:
+        targets = prompt_for_drives(drives)
+
+    if not targets:
+        print("Nothing to do.")
+        return 0
+
+    missing = [path for path in targets if not os.path.isdir(path)]
+    for path in missing:
+        print("error: not a directory: %s" % path, file=sys.stderr)
+    targets = [path for path in targets if os.path.isdir(path)]
+    if not targets:
+        return 1
+
+    if not args.dry_run and not _extension.CACHE_PATH:
+        print("error: on-disk caching is disabled (cache_dir is empty), so "
+              "there is nowhere to write the index.\nSee CONFIGURATION in "
+              "the extension, or use --dry-run.", file=sys.stderr)
+        return 1
+
+    # Merge into whatever is already cached rather than replacing it.
+    cache = _extension.load_cache() if not args.dry_run else {}
+    print("Cache: %s" % (_extension.CACHE_PATH or "(disabled, dry run)"))
+    print("Starting with %d cached directories.\n" % len(cache))
+
+    started = time.monotonic()
+    indexed_total = 0
+
+    try:
+        for target in targets:
+            print("Indexing %s ..." % target)
+            drive_started = time.monotonic()
+
+            def progress(scanned, current, _t=drive_started):
+                print("    %6d directories, %5.1fs  %s"
+                      % (scanned, time.monotonic() - _t, current[:70]),
+                      flush=True)
+
+            found = index_tree(target, cross_mounts=args.cross_mounts,
+                               on_progress=progress)
+            cache.update(found)
+            indexed_total += len(found)
+
+            root_size = found.get(target, (0, 0))[1]
+            print("  %d directories, %s total, %.1fs\n"
+                  % (len(found), _extension.format_size(root_size),
+                     time.monotonic() - drive_started))
+    except KeyboardInterrupt:
+        # Keep what was measured: an interrupted index is still useful, and
+        # throwing away several minutes of disk reads because of a Ctrl-C is
+        # the sort of thing that makes people not run it again.
+        print("\nInterrupted -- saving what was indexed so far.")
+
+    if len(cache) > args.max_entries:
+        # Keep the biggest directories: they are the ones worth not measuring
+        # again, and small ones are near-instant anyway.
+        dropped = len(cache) - args.max_entries
+        kept = sorted(cache.items(), key=lambda item: item[1][1],
+                      reverse=True)[:args.max_entries]
+        cache = dict(kept)
+        print("Cache capped at %d entries (dropped %d smallest). "
+              "Raise --max-entries to keep more."
+              % (args.max_entries, dropped))
+
+    elapsed = time.monotonic() - started
+    print("Indexed %d directories in %.1fs." % (indexed_total, elapsed))
+
+    if args.dry_run:
+        print("Dry run: nothing written.")
+        return 0
+
+    if _extension.save_cache(cache):
+        print("Wrote %d entries to %s" % (len(cache), _extension.CACHE_PATH))
+        print("\nRestart nautilus (nautilus -q) to pick up the new cache.")
+        return 0
+
+    print("error: could not write the cache. Run with the debug marker "
+          "(~/.config/nautilus-total-size-debug) for the reason.",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

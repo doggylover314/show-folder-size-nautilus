@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached in memory, so browsing
 never blocks. While a folder is being measured the column reads
 `Calculating...`.
 
-> **Status: v0.3.0.** Measurement now uses the same GIO call as
+> **Status: v0.4.0.** Measurement now uses the same GIO call as
 > Nautilus' Properties window, and sizes are formatted exactly like the
 > built-in Size column. See [Known issues](#known-issues) before installing.
 
@@ -104,6 +104,35 @@ module. That's the interpreter, not this code, and it's safe to delete.
 > than quietly dropping the claim. If the strict no-writes property matters to
 > you, pin v0.2.0.
 
+## Pre-indexing whole drives
+
+Browsing measures folders on demand, which is fast but still shows
+`Calculating...` the first time. `total-size-index` walks drives up front and
+fills the cache, so sizes are there from the first look:
+
+```bash
+total-size-index                # lists your drives, asks which to index
+total-size-index --all          # every local drive, no prompt
+total-size-index ~/Videos       # just these paths
+total-size-index --list         # show what it would offer, do nothing
+total-size-index --all --dry-run   # measure and report, write nothing
+```
+
+Then `nautilus -q` to pick up the new cache.
+
+It walks each tree **bottom-up in a single pass**, so every directory in it
+gets a size for the cost of reading the tree once. Measuring each directory
+independently would be quadratic — a tree ten deep read ten times.
+
+By default it does **not cross mount points**, so indexing `/` won't wander
+onto an external drive; pass `--cross-mounts` if you want that. Ctrl-C saves
+what it has already measured rather than discarding the work. The cache is
+capped (`--max-entries`, default 20000) keeping the **largest** directories,
+since those are the ones worth not measuring again.
+
+If you installed from the `.deb` it's on your `PATH`; from a clone, run
+`./total-size-index`.
+
 ## Configuration
 
 Where the cache lives, highest precedence first:
@@ -191,7 +220,7 @@ Delete it when you're done.
 - [x] Match the desktop's own size formatting
 - [x] Persistent on-disk cache surviving restarts
 - [x] Filesystem monitoring (`GFileMonitor`) to invalidate on deep changes
-- [ ] Optional startup indexing of selected drives
+- [x] Optional pre-indexing of selected drives
 - [ ] Verified GNOME 47+ support
 
 ## License

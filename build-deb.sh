@@ -34,9 +34,11 @@ echo "Building ${PKG} ${VERSION}"
 rm -rf "${BUILD}"
 mkdir -p "${BUILD}/DEBIAN" \
          "${BUILD}/usr/share/nautilus-python/extensions" \
+         "${BUILD}/usr/bin" \
          "${BUILD}/usr/share/doc/${PKG}"
 
 install -m 0644 "${SRC}" "${BUILD}/usr/share/nautilus-python/extensions/"
+install -m 0755 "${HERE}/total-size-index" "${BUILD}/usr/bin/total-size-index"
 install -m 0644 "${HERE}/README.md"  "${BUILD}/usr/share/doc/${PKG}/"
 install -m 0644 "${HERE}/INSTALL.md" "${BUILD}/usr/share/doc/${PKG}/"
 
@@ -66,6 +68,9 @@ Description: Total Size column for GNOME Files showing recursive folder sizes
  .
  After installing, run "nautilus -q", then enable the column in List View via
  the view menu, Visible Columns.
+ .
+ The total-size-index command pre-computes sizes for whole drives so browsing
+ them is instant from the first look.
 EOF
 
 # debconf asks where to keep the size cache and postinst records the answer in

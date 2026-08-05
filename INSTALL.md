@@ -20,7 +20,7 @@ ls /usr/lib/*/nautilus/extensions-4/libnautilus-python.so
 
 If that path doesn't exist but the package is installed, your Nautilus is
 older than 4.0 and this extension will not load (see
-[Version compatibility](#6-version-compatibility)).
+[Version compatibility](#7-version-compatibility)).
 
 ## 2. Install the extension
 
@@ -96,7 +96,19 @@ cache_dir=
 The `.deb` asks this at install time and records the system-wide default in
 `/etc/nautilus-total-size.conf`; the per-user file above overrides it.
 
-## 6. Version compatibility
+## 6. Pre-index your drives (optional)
+
+Fills the cache up front so sizes appear immediately rather than being
+measured as you browse:
+
+```bash
+total-size-index          # asks which drives to index
+nautilus -q               # pick up the new cache
+```
+
+From a clone it's `./total-size-index`. `--help` lists the rest.
+
+## 7. Version compatibility
 
 This extension targets **libnautilus-extension 4.0**, which is what GNOME 46
 ships. Check yours:
