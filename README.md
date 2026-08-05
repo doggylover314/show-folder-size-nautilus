@@ -8,9 +8,9 @@ Sizes are computed on background threads and cached in memory, so browsing
 never blocks. While a folder is being measured the column reads
 `Calculating...`.
 
-> **Status: early / v0.1.0.** This works, but there is a significant known bug
-> where many folders stay stuck on `Calculating...`. See
-> [Known issues](#known-issues) before installing. Fix in progress.
+> **Status: early / v0.2.0.** Measurement now uses the same GIO call as
+> Nautilus' Properties window, and sizes are formatted exactly like the
+> built-in Size column. See [Known issues](#known-issues) before installing.
 
 ---
 
@@ -45,10 +45,14 @@ Full instructions, distro package names and troubleshooting:
 
 - `Nautilus.ColumnProvider` registers the column; `Nautilus.InfoProvider`
   fills in a value per file.
-- Directory totals come from `os.walk()` + `os.stat(follow_symlinks=False)`,
-  summing regular files only.
-- Walks run on a small fixed thread pool (4 workers), never on the GTK main
-  thread. Results cross back via `GLib.idle_add()`.
+- Directory totals come from `Gio.File.measure_disk_usage()` — the same GIO
+  call Nautilus' own Properties window uses — with `os.walk()` +
+  `os.stat(follow_symlinks=False)` as a fallback.
+- Measurements run on a small fixed thread pool (4 workers), never on the GTK
+  main thread. Results cross back via `GLib.idle_add()` at `PRIORITY_DEFAULT`.
+- Sizes are formatted with `GLib.format_size()`, so they match the built-in
+  Size column and follow your locale (base-10: 1 GiB reads as `1.1 GB`).
+- Regular files are left blank — Nautilus' Size column already covers them.
 - Results are cached in memory keyed by `(path, directory mtime)`, so
   re-entering an unchanged folder is instant.
 
@@ -64,9 +68,9 @@ Full instructions, distro package names and troubleshooting:
 
 ## Is it safe? (read-only guarantee)
 
-As of **v0.1.0** this extension only ever *reads* the filesystem. The complete
-list of filesystem calls in the entire file is `os.walk`, `os.stat` and
-`os.lstat`. There is:
+As of **v0.2.0** this extension only ever *reads* the filesystem. Sizes come
+from `Gio.File.measure_disk_usage()` (the same call Nautilus' Properties
+window uses), falling back to `os.walk` / `os.stat` / `os.lstat`. There is:
 
 - **no** `open()`, write, delete, rename, mkdir or chmod — this code creates
   nothing on disk, not even a cache file (the size cache is in RAM and dies
@@ -74,7 +78,7 @@ list of filesystem calls in the entire file is `os.walk`, `os.stat` and
 - **no** network use of any kind — no sockets, no HTTP, no DNS
 - **no** subprocesses — no `subprocess`, `os.system`, `popen`, `exec*`, `fork`
 - imports limited to stdlib (`os`, `stat`, `queue`, `threading`,
-  `collections`, `sys`) plus PyGObject
+  `collections`, `sys`, `time`) plus PyGObject
 
 It's a single ~300-line file with a header block stating the same thing, so
 you can audit it at a glance before trusting it with your filesystem.
@@ -83,29 +87,24 @@ One honest caveat: CPython writes a `__pycache__/` bytecode directory next to
 the extension when Nautilus imports it, exactly as it does for every Python
 module. That's the interpreter, not this code, and it's safe to delete.
 
-> **This will change in v0.2.0.** Persistent (on-disk) caching is planned,
+> **This will change in v0.3.0.** Persistent (on-disk) caching is planned,
 > which means the extension *will* start writing one cache file under
 > `~/.cache/`. The audit notes will be rewritten to say so honestly rather
 > than quietly dropping the claim. If the strict no-writes property matters to
-> you, pin v0.1.0.
+> you, pin v0.2.0.
 
 ## Known issues
 
-- **Many folders stay on `Calculating...` indefinitely.** Some resolve, most
-  don't. The extension returns immediately and calls
-  `FileInfo.invalidate_extension_info()` when the background walk finishes, to
-  make Nautilus re-ask; that refresh appears not to fire reliably. Confirmed
-  *not* caused by slow I/O or cache-key churn. The fix under investigation is
-  to switch to the proper async `InfoProvider` protocol
-  (`OperationResult.IN_PROGRESS` + `info_provider_update_complete_invoke()` +
-  `cancel_update()`).
+- **Nautilus' built-in "Size" column can't be hidden by an extension.** If
+  you'd rather see only this column, untick **Size** yourself in Visible
+  Columns.
 - **Sorting is alphabetical, not numeric.** Clicking the header puts `9.9 KB`
   before `1.2 GB`. The extension API exposes no sort-key hook, so this can't be
   fixed from inside an extension.
 - **Deep changes don't invalidate the cache.** The key uses the folder's own
   mtime, which only changes when its *direct* children change. Edit a file
   three levels down and the total stays stale until `Ctrl+R` or a restart.
-  Filesystem monitoring is planned for v0.2.0.
+  Filesystem monitoring is planned for v0.3.0.
 - **`os.walk` crosses mount points**, so a folder containing a mounted volume
   includes that volume's contents.
 - Only local `file://` paths are measured; other URI schemes get a blank cell
@@ -138,7 +137,8 @@ import error.
 
 ## Roadmap
 
-- [ ] Fix folders stuck on `Calculating...` (async `InfoProvider` protocol)
+- [x] Fix folders stuck on `Calculating...`
+- [x] Match the desktop's own size formatting
 - [ ] Persistent on-disk cache surviving restarts
 - [ ] Filesystem monitoring (`GFileMonitor`) to invalidate on deep changes
 - [ ] Optional startup indexing of selected drives
