@@ -1,0 +1,13 @@
+#!/bin/sh
+# Remove our config on purge only, never on a plain remove/upgrade.
+set -e
+case "$1" in
+    purge)
+        rm -f /etc/nautilus-total-size.conf
+        if [ -e /usr/share/debconf/confmodule ]; then
+            . /usr/share/debconf/confmodule
+            db_purge || true
+        fi
+        ;;
+esac
+exit 0

@@ -52,7 +52,7 @@ Version: ${VERSION}
 Section: gnome
 Priority: optional
 Architecture: ${ARCH}
-Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus (>= 43)
+Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus (>= 43), debconf (>= 0.5) | debconf-2.0
 Maintainer: ${MAINTAINER}
 Homepage: ${HOMEPAGE}
 Description: Total Size column for GNOME Files showing recursive folder sizes
@@ -68,8 +68,19 @@ Description: Total Size column for GNOME Files showing recursive folder sizes
  the view menu, Visible Columns.
 EOF
 
-# No preinst/postinst/prerm on purpose: nothing needs configuring, and
-# silently killing a running file manager during package install is rude.
+# debconf asks where to keep the size cache and postinst records the answer in
+# /etc/nautilus-total-size.conf. This uses debconf rather than a bare `read`
+# because package installs are frequently non-interactive (unattended-upgrades,
+# images, CI) and a prompt on stdin would hang them forever. debconf handles
+# preseeding and non-interactive frontends properly.
+#
+# Still no service and no restart: an extension runs inside nautilus, there is
+# nothing to daemonise, and killing a running file manager during a package
+# install would be rude.
+for script in config postinst postrm; do
+    install -m 0755 "${HERE}/debian/${script}" "${BUILD}/DEBIAN/${script}"
+done
+install -m 0644 "${HERE}/debian/templates" "${BUILD}/DEBIAN/templates"
 
 dpkg-deb --root-owner-group --build "${BUILD}" >/dev/null
 

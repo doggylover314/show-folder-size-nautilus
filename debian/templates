@@ -1,0 +1,17 @@
+Template: nautilus-total-size/cache-dir
+Type: string
+Default: ~/.cache/nautilus-total-size
+Description: Where should folder sizes be cached?
+ The Total Size column remembers measured folder sizes so re-visiting a
+ folder is instant instead of re-measuring it. This sets the system-wide
+ default location for that cache.
+ .
+ A leading ~/ is expanded per user, so the default gives every user their
+ own cache under their home directory. An absolute path shared between
+ users is possible but rarely what you want.
+ .
+ Leave this empty to disable on-disk caching entirely: sizes are then
+ remembered only until nautilus restarts, and the extension writes nothing
+ to disk at all.
+ .
+ Individual users can override this in ~/.config/nautilus-total-size.conf.

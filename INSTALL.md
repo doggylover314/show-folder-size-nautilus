@@ -138,4 +138,11 @@ rm ~/.local/share/nautilus-python/extensions/total_size_column.py
 nautilus -q
 ```
 
-Nothing else is left behind — v0.1.0 writes no files, no config and no cache.
+Since v0.3.0 there is also a cache to remove if you want it gone:
+
+```bash
+rm -rf ~/.cache/nautilus-total-size
+```
+
+If you installed the `.deb`, `sudo apt purge nautilus-total-size` also removes
+`/etc/nautilus-total-size.conf`; a plain `remove` leaves it in place.

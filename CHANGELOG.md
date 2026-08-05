@@ -68,14 +68,49 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one, and the main thread runs Python at full speed throughout). Switching to
   GIO was justified by speed alone.
 
+## [0.3.0] - 2026-08-05
+
+### Added
+- **Persistent on-disk cache.** Sizes now survive a Nautilus restart. Written
+  atomically (temp file + `os.replace`) so a crash mid-write cannot corrupt
+  it; a corrupt or unreadable cache is ignored rather than raised. Location is
+  configurable — env var, user config, system config, then the XDG default
+  `~/.cache/nautilus-total-size/`. **Setting it empty disables writing
+  entirely.**
+- **Filesystem monitoring.** Visited directories are watched with
+  `GFileMonitor`; a change drops the cached total for that directory *and
+  every ancestor*, since a file written three levels down changes all of their
+  totals. Linux has no recursive watch and one per subdirectory would exhaust
+  the inotify limit, so watches are bounded (`MONITOR_LIMIT`, 256) and evicted
+  LRU. Deep changes are therefore caught in recently-visited directories.
+- **`.deb` now asks where to store the cache**, via debconf, defaulting to
+  `~/.cache/nautilus-total-size`. debconf rather than a bare `read` because
+  package installs are often non-interactive (unattended-upgrades, images, CI)
+  and a stdin prompt would hang them. The answer is written to
+  `/etc/nautilus-total-size.conf` as the system default; users override it in
+  `~/.config/nautilus-total-size.conf`. Removed on purge, not on remove.
+
+### Changed
+- **The no-writes guarantee no longer holds** — this is the first version that
+  writes anything. The audit notes say so explicitly at the top rather than
+  quietly dropping the old claim. Pin v0.2.2, or set an empty cache dir, if
+  you need the write path never reached.
+- The cache stores byte counts rather than formatted strings, so a cache
+  written under one locale doesn't force stale text on another.
+- Cache is keyed by path with the mtime stored alongside, rather than by a
+  `(path, mtime)` tuple — invalidating a whole ancestor chain needs
+  path-keyed lookup.
+- Raised `CACHE_LIMIT` from 4096 to 20000 now that entries persist.
+
 ## [Unreleased]
 
 ### Planned
-- Persistent on-disk cache surviving Nautilus restarts. **This will end the
-  current no-writes guarantee**; audit notes will be updated to match.
-- Filesystem monitoring via `GFileMonitor` so deep changes invalidate cached totals.
 - Optional startup indexing of user-selected drives.
 - Verified support for GNOME 47 and newer.
+- C rewrite of the per-file callback is **not** planned on current evidence:
+  measured at 3.4us per row, 68% of it the `os.lstat` a C module would also
+  pay. Real saving is ~1.1us/row — 55ms on a 50,000-row folder. It would cost
+  the single-auditable-file property and architecture-independent packaging.
 
 ## [0.2.0] - 2026-08-05
 
@@ -140,7 +175,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.3.0
 [0.2.2]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.2
 [0.2.1]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.1
 [0.2.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.0

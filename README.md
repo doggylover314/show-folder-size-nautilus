@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached in memory, so browsing
 never blocks. While a folder is being measured the column reads
 `Calculating...`.
 
-> **Status: early / v0.2.2.** Measurement now uses the same GIO call as
+> **Status: v0.3.0.** Measurement now uses the same GIO call as
 > Nautilus' Properties window, and sizes are formatted exactly like the
 > built-in Size column. See [Known issues](#known-issues) before installing.
 
@@ -72,13 +72,20 @@ Full instructions, distro package names and troubleshooting:
 
 ## Is it safe? (read-only guarantee)
 
-As of **v0.2.2** this extension only ever *reads* the filesystem. Sizes come
-from `Gio.File.measure_disk_usage()` (the same call Nautilus' Properties
-window uses), falling back to `os.walk` / `os.stat` / `os.lstat`. There is:
+**This changed in v0.3.0.** Up to v0.2.2 the extension wrote nothing at all.
+It now writes **exactly one file**: its size cache, by default
+`~/.cache/nautilus-total-size/sizes.json`, written atomically (temp file +
+`os.replace`) so a crash can't corrupt it. It holds directory paths, mtimes
+and byte counts — nothing else — and is safe to delete at any time.
 
-- **no** `open()`, write, delete, rename, mkdir or chmod — this code creates
-  nothing on disk, not even a cache file (the size cache is in RAM and dies
-  with nautilus)
+**Set the cache directory to empty and it writes nothing**, restoring the old
+behaviour (see [Configuration](#configuration)). Everything else is unchanged.
+Sizes come from `Gio.File.measure_disk_usage()` (the same call Nautilus'
+Properties window uses), falling back to `os.walk` / `os.stat` / `os.lstat`.
+There is:
+
+- **no** writes anywhere except that one cache file — no deletes, no renames,
+  no chmod, no mkdir outside the cache directory
 - **no** network use of any kind — no sockets, no HTTP, no DNS
 - **no** subprocesses — no `subprocess`, `os.system`, `popen`, `exec*`, `fork`
 - imports limited to stdlib (`os`, `stat`, `queue`, `threading`,
@@ -97,6 +104,36 @@ module. That's the interpreter, not this code, and it's safe to delete.
 > than quietly dropping the claim. If the strict no-writes property matters to
 > you, pin v0.2.0.
 
+## Configuration
+
+Where the cache lives, highest precedence first:
+
+1. `NAUTILUS_TOTAL_SIZE_CACHE` environment variable
+2. `cache_dir=` in `~/.config/nautilus-total-size.conf`
+3. `cache_dir=` in `/etc/nautilus-total-size.conf` (written by the `.deb`)
+4. `$XDG_CACHE_HOME/nautilus-total-size` — i.e. `~/.cache/nautilus-total-size`
+
+Setting any of them to an **empty value disables on-disk caching entirely**:
+
+```ini
+# ~/.config/nautilus-total-size.conf
+cache_dir=
+```
+
+## Filesystem monitoring
+
+Directories you visit are watched with `GFileMonitor`. When one changes, the
+cached total for it **and every ancestor** is dropped — a file written three
+levels down changes all of their totals, so invalidating only the immediate
+directory would leave the folder you're looking at showing a stale number.
+
+Linux has no recursive watch, and putting one on every subdirectory would
+exhaust the inotify limit on any real disk. So watches are bounded
+(`MONITOR_LIMIT`, 256) and evicted least-recently-used. The practical
+consequence: **deep changes are noticed in directories you've visited
+recently**. Change something far below a folder nobody is watching and its
+total stays cached until its own mtime changes. `Ctrl+R` forces a recount.
+
 ## Known issues
 
 - **Nautilus' built-in "Size" column can't be hidden by an extension.** If
@@ -105,10 +142,8 @@ module. That's the interpreter, not this code, and it's safe to delete.
 - **Sorting is alphabetical, not numeric.** Clicking the header puts `9.9 KB`
   before `1.2 GB`. The extension API exposes no sort-key hook, so this can't be
   fixed from inside an extension.
-- **Deep changes don't invalidate the cache.** The key uses the folder's own
-  mtime, which only changes when its *direct* children change. Edit a file
-  three levels down and the total stays stale until `Ctrl+R` or a restart.
-  Filesystem monitoring is planned for v0.3.0.
+- **Deep changes are only caught in watched directories** — see
+  [Filesystem monitoring](#filesystem-monitoring) for the bound and why.
 - **`os.walk` crosses mount points**, so a folder containing a mounted volume
   includes that volume's contents.
 - Only local `file://` paths are measured; other URI schemes get a blank cell
@@ -154,8 +189,8 @@ Delete it when you're done.
 
 - [x] Fix folders stuck on `Calculating...`
 - [x] Match the desktop's own size formatting
-- [ ] Persistent on-disk cache surviving restarts
-- [ ] Filesystem monitoring (`GFileMonitor`) to invalidate on deep changes
+- [x] Persistent on-disk cache surviving restarts
+- [x] Filesystem monitoring (`GFileMonitor`) to invalidate on deep changes
 - [ ] Optional startup indexing of selected drives
 - [ ] Verified GNOME 47+ support
 
