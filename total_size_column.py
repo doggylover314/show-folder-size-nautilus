@@ -455,3 +455,42 @@ class TotalSizeColumn(GObject.GObject,
                 _log("completing %s failed: %r" % (key[0], exc))
 
         return GLib.SOURCE_REMOVE
+
+
+# --- self test --------------------------------------------------------------
+#
+# Running this file directly measures a folder the same way the extension
+# does, and reports how long it took.  Use it to tell apart "measuring this
+# folder is genuinely slow" from "measuring is fast but Nautilus never shows
+# the result":
+#
+#     python3 total_size_column.py /path/to/big/folder
+#
+# If this prints a size in a couple of seconds but the column still says
+# "Calculating...", the bug is in delivery, not in measurement.
+
+if __name__ == "__main__":
+    targets = sys.argv[1:] or [os.path.expanduser("~")]
+    for target in targets:
+        print("measuring %s ..." % target, flush=True)
+
+        begin = time.monotonic()
+        gio_error = None
+        try:
+            gio_bytes = _measure_with_gio(target, None)
+        except GLib.Error as err:
+            gio_bytes, gio_error = None, err.message
+        gio_seconds = time.monotonic() - begin
+
+        if gio_bytes is None:
+            print("  GIO          : FAILED (%s)" % gio_error)
+        else:
+            print("  GIO          : %-12s in %6.2fs   (%d bytes)"
+                  % (format_size(gio_bytes), gio_seconds, gio_bytes))
+
+        begin = time.monotonic()
+        walk_bytes = _measure_with_walk(target)
+        walk_seconds = time.monotonic() - begin
+        print("  os.walk      : %-12s in %6.2fs   (%d bytes)"
+              % (format_size(walk_bytes), walk_seconds, walk_bytes))
+        print("  column shows : %s" % format_size(gio_bytes or walk_bytes))

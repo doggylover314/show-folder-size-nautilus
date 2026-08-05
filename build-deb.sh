@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Build a .deb for nautilus-total-size.
+#
+# Needs only dpkg-deb (dpkg-dev), which Debian/Ubuntu already have.
+# Produces ./dist/nautilus-total-size_<version>_all.deb
+#
+# The package installs one Python file system-wide to
+# /usr/share/nautilus-python/extensions/ and nothing else. It runs no
+# maintainer scripts that touch your files and does not restart nautilus for
+# you -- you do that yourself with `nautilus -q`.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${HERE}/total_size_column.py"
+PKG="nautilus-total-size"
+ARCH="all"
+MAINTAINER="doggylover314 <doggylover314@users.noreply.github.com>"
+HOMEPAGE="https://github.com/doggylover314/nautilus-total-size"
+
+command -v dpkg-deb >/dev/null 2>&1 || {
+    echo "error: dpkg-deb not found. Install it with: sudo apt install dpkg-dev" >&2
+    exit 1
+}
+[[ -f "${SRC}" ]] || { echo "error: ${SRC} not found" >&2; exit 1; }
+
+# Single source of truth for the version: __version__ in the extension.
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${SRC}")"
+[[ -n "${VERSION}" ]] || { echo "error: could not read __version__ from ${SRC}" >&2; exit 1; }
+
+BUILD="${HERE}/build/${PKG}_${VERSION}_${ARCH}"
+OUT="${HERE}/dist"
+
+echo "Building ${PKG} ${VERSION}"
+rm -rf "${BUILD}"
+mkdir -p "${BUILD}/DEBIAN" \
+         "${BUILD}/usr/share/nautilus-python/extensions" \
+         "${BUILD}/usr/share/doc/${PKG}"
+
+install -m 0644 "${SRC}" "${BUILD}/usr/share/nautilus-python/extensions/"
+install -m 0644 "${HERE}/README.md"  "${BUILD}/usr/share/doc/${PKG}/"
+install -m 0644 "${HERE}/INSTALL.md" "${BUILD}/usr/share/doc/${PKG}/"
+
+# Debian wants the licence as `copyright`.
+install -m 0644 "${HERE}/LICENSE" "${BUILD}/usr/share/doc/${PKG}/copyright"
+
+gzip -9cn "${HERE}/CHANGELOG.md" > "${BUILD}/usr/share/doc/${PKG}/changelog.gz"
+chmod 0644 "${BUILD}/usr/share/doc/${PKG}/changelog.gz"
+
+cat > "${BUILD}/DEBIAN/control" <<EOF
+Package: ${PKG}
+Version: ${VERSION}
+Section: gnome
+Priority: optional
+Architecture: ${ARCH}
+Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus (>= 43)
+Maintainer: ${MAINTAINER}
+Homepage: ${HOMEPAGE}
+Description: Total Size column for GNOME Files showing recursive folder sizes
+ Adds an optional "Total Size" column to the Nautilus list view that shows the
+ recursive size of a folder's contents, the same number the Properties window
+ reports, instead of the built-in item count.
+ .
+ Sizes are measured in the background with Gio.File.measure_disk_usage and
+ cached in memory, so browsing never blocks. The extension only reads the
+ filesystem: no writes, no network access and no subprocesses.
+ .
+ After installing, run "nautilus -q", then enable the column in List View via
+ the view menu, Visible Columns.
+EOF
+
+# No preinst/postinst/prerm on purpose: nothing needs configuring, and
+# silently killing a running file manager during package install is rude.
+
+dpkg-deb --root-owner-group --build "${BUILD}" >/dev/null
+
+mkdir -p "${OUT}"
+DEB="${OUT}/${PKG}_${VERSION}_${ARCH}.deb"
+mv "${BUILD}.deb" "${DEB}"
+rm -rf "${HERE}/build"
+
+echo
+echo "Built: ${DEB}"
+echo
+dpkg-deb --info "${DEB}" | sed 's/^/  /'
+echo "  Contents:"
+dpkg-deb --contents "${DEB}" | sed 's/^/    /'
+echo
+echo "Install with:  sudo apt install ${DEB}"
+echo "Then run:      nautilus -q"
