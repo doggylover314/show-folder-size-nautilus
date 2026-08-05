@@ -2,6 +2,6 @@
 # debconf frontend: ask where the size cache should live.
 set -e
 . /usr/share/debconf/confmodule
-db_input medium nautilus-total-size/cache-dir || true
+db_input medium show-folder-size-nautilus/cache-dir || true
 db_go || true
 exit 0

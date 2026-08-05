@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-total-size-index -- pre-compute folder sizes for the Total Size column.
+show-folder-size-index -- pre-compute folder sizes for the Total Size column.
 
 WHAT IT DOES
 ------------
@@ -12,15 +12,15 @@ drives shows sizes instantly instead of measuring on demand.
 Run it with no arguments and it lists your mounted drives and asks which to
 index.  Or:
 
-    total-size-index --list              # show what it would offer, do nothing
-    total-size-index --all               # index every local drive, no prompt
-    total-size-index ~/Videos /mnt/data  # index specific paths
-    total-size-index --all --dry-run     # measure, report, write nothing
+    show-folder-size-index --list              # show what it would offer, do nothing
+    show-folder-size-index --all               # index every local drive, no prompt
+    show-folder-size-index ~/Videos /mnt/data  # index specific paths
+    show-folder-size-index --all --dry-run     # measure, report, write nothing
 
 SAFETY / AUDIT NOTES
 --------------------
   * Reads with os.walk() and os.lstat().  Writes exactly one file: the same
-    size cache the extension uses (~/.cache/nautilus-total-size/sizes.json by
+    size cache the extension uses (~/.cache/show-folder-size-nautilus/sizes.json by
     default), written atomically by the extension's own save function.
     --dry-run writes nothing at all.
   * No network, no subprocesses, nothing removed or modified on disk.
@@ -55,18 +55,18 @@ _SEARCH_PATHS = [
 
 _extension = None
 for _candidate in _SEARCH_PATHS:
-    if os.path.exists(os.path.join(_candidate, "total_size_column.py")):
+    if os.path.exists(os.path.join(_candidate, "show_folder_size.py")):
         sys.path.insert(0, _candidate)
         try:
-            import total_size_column as _extension
+            import show_folder_size as _extension
         except Exception as _exc:            # pragma: no cover
-            print("error: found total_size_column.py in %s but could not "
+            print("error: found show_folder_size.py in %s but could not "
                   "import it: %r" % (_candidate, _exc), file=sys.stderr)
             raise SystemExit(1)
         break
 
 if _extension is None:
-    print("error: total_size_column.py not found. Looked in:\n  %s\n"
+    print("error: show_folder_size.py not found. Looked in:\n  %s\n"
           "Install the extension first (see INSTALL.md)."
           % "\n  ".join(_SEARCH_PATHS), file=sys.stderr)
     raise SystemExit(1)
@@ -207,7 +207,7 @@ def prompt_for_drives(drives):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="total-size-index",
+        prog="show-folder-size-index",
         description="Pre-compute folder sizes for the nautilus Total Size "
                     "column.",
         epilog="With no arguments, lists your drives and asks which to index.",
@@ -316,7 +316,7 @@ def main(argv=None):
         return 0
 
     print("error: could not write the cache. Run with the debug marker "
-          "(~/.config/nautilus-total-size-debug) for the reason.",
+          "(~/.config/show-folder-size-nautilus-debug) for the reason.",
           file=sys.stderr)
     return 1
 

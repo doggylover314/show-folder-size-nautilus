@@ -1,6 +1,6 @@
-Template: nautilus-total-size/cache-dir
+Template: show-folder-size-nautilus/cache-dir
 Type: string
-Default: ~/.cache/nautilus-total-size
+Default: ~/.cache/show-folder-size-nautilus
 Description: Where should folder sizes be cached?
  The Total Size column remembers measured folder sizes so re-visiting a
  folder is instant instead of re-measuring it. This sets the system-wide
@@ -14,4 +14,4 @@ Description: Where should folder sizes be cached?
  remembered only until nautilus restarts, and the extension writes nothing
  to disk at all.
  .
- Individual users can override this in ~/.config/nautilus-total-size.conf.
+ Individual users can override this in ~/.config/show-folder-size-nautilus.conf.

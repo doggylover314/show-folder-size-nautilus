@@ -1,4 +1,4 @@
-# nautilus-total-size
+# show-folder-size-nautilus
 
 A **"Total Size"** column for GNOME Files (Nautilus) that shows the *recursive*
 size of a folder's contents — like `du -sh` — instead of Nautilus' built-in
@@ -30,8 +30,8 @@ Newer GNOME releases (47+) are **not yet verified** — see
 
 ```bash
 mkdir -p ~/.local/share/nautilus-python/extensions
-curl -o ~/.local/share/nautilus-python/extensions/total_size_column.py \
-  https://raw.githubusercontent.com/doggylover314/nautilus-total-size/main/total_size_column.py
+curl -o ~/.local/share/nautilus-python/extensions/show_folder_size.py \
+  https://raw.githubusercontent.com/doggylover314/show-folder-size-nautilus/main/show_folder_size.py
 nautilus -q   # closes open windows; next launch loads the extension
 ```
 
@@ -74,7 +74,7 @@ Full instructions, distro package names and troubleshooting:
 
 **This changed in v0.3.0.** Up to v0.2.2 the extension wrote nothing at all.
 It now writes **exactly one file**: its size cache, by default
-`~/.cache/nautilus-total-size/sizes.json`, written atomically (temp file +
+`~/.cache/show-folder-size-nautilus/sizes.json`, written atomically (temp file +
 `os.replace`) so a crash can't corrupt it. It holds directory paths, mtimes
 and byte counts — nothing else — and is safe to delete at any time.
 
@@ -107,15 +107,15 @@ module. That's the interpreter, not this code, and it's safe to delete.
 ## Pre-indexing whole drives
 
 Browsing measures folders on demand, which is fast but still shows
-`Calculating...` the first time. `total-size-index` walks drives up front and
+`Calculating...` the first time. `show-folder-size-index` walks drives up front and
 fills the cache, so sizes are there from the first look:
 
 ```bash
-total-size-index                # lists your drives, asks which to index
-total-size-index --all          # every local drive, no prompt
-total-size-index ~/Videos       # just these paths
-total-size-index --list         # show what it would offer, do nothing
-total-size-index --all --dry-run   # measure and report, write nothing
+show-folder-size-index                # lists your drives, asks which to index
+show-folder-size-index --all          # every local drive, no prompt
+show-folder-size-index ~/Videos       # just these paths
+show-folder-size-index --list         # show what it would offer, do nothing
+show-folder-size-index --all --dry-run   # measure and report, write nothing
 ```
 
 Then `nautilus -q` to pick up the new cache.
@@ -131,21 +131,21 @@ capped (`--max-entries`, default 20000) keeping the **largest** directories,
 since those are the ones worth not measuring again.
 
 If you installed from the `.deb` it's on your `PATH`; from a clone, run
-`./total-size-index`.
+`./show-folder-size-index`.
 
 ## Configuration
 
 Where the cache lives, highest precedence first:
 
-1. `NAUTILUS_TOTAL_SIZE_CACHE` environment variable
-2. `cache_dir=` in `~/.config/nautilus-total-size.conf`
-3. `cache_dir=` in `/etc/nautilus-total-size.conf` (written by the `.deb`)
-4. `$XDG_CACHE_HOME/nautilus-total-size` — i.e. `~/.cache/nautilus-total-size`
+1. `SHOW_FOLDER_SIZE_CACHE` environment variable
+2. `cache_dir=` in `~/.config/show-folder-size-nautilus.conf`
+3. `cache_dir=` in `/etc/show-folder-size-nautilus.conf` (written by the `.deb`)
+4. `$XDG_CACHE_HOME/show-folder-size-nautilus` — i.e. `~/.cache/show-folder-size-nautilus`
 
 Setting any of them to an **empty value disables on-disk caching entirely**:
 
 ```ini
-# ~/.config/nautilus-total-size.conf
+# ~/.config/show-folder-size-nautilus.conf
 cache_dir=
 ```
 
@@ -196,20 +196,20 @@ include your `nautilus --version` and any stderr output.
 Create the marker file and watch the journal:
 
 ```bash
-touch ~/.config/nautilus-total-size-debug
+touch ~/.config/show-folder-size-nautilus-debug
 nautilus -q
-journalctl --user -f | grep total-size
+journalctl --user -f | grep show-folder-size
 ```
 
-Note that `grep total-size` also hides Python tracebacks, which don't contain
+Note that `grep show-folder-size` also hides Python tracebacks, which don't contain
 that string. If something stops working entirely, drop the grep.
 
 Each queued folder, each completed measurement (with timing) and any Python
 import error is logged.
 
-The `NAUTILUS_TOTAL_SIZE_DEBUG=1` environment variable also works, but it's
+The `SHOW_FOLDER_SIZE_DEBUG=1` environment variable also works, but it's
 unreliable in practice: nautilus is D-Bus activated, so
-`NAUTILUS_TOTAL_SIZE_DEBUG=1 nautilus` usually just hands your request to a
+`SHOW_FOLDER_SIZE_DEBUG=1 nautilus` usually just hands your request to a
 nautilus that is already running with a different environment, and the
 variable never arrives. The marker file survives however nautilus is started.
 Delete it when you're done.

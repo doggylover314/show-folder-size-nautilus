@@ -31,15 +31,15 @@ directory usually doesn't exist yet.
 
 ```bash
 mkdir -p ~/.local/share/nautilus-python/extensions
-curl -o ~/.local/share/nautilus-python/extensions/total_size_column.py \
-  https://raw.githubusercontent.com/doggylover314/nautilus-total-size/main/total_size_column.py
+curl -o ~/.local/share/nautilus-python/extensions/show_folder_size.py \
+  https://raw.githubusercontent.com/doggylover314/show-folder-size-nautilus/main/show_folder_size.py
 ```
 
 **Option B — from a clone:**
 
 ```bash
-git clone https://github.com/doggylover314/nautilus-total-size.git
-cd nautilus-total-size
+git clone https://github.com/doggylover314/show-folder-size-nautilus.git
+cd show-folder-size-nautilus
 ./install.sh
 ```
 
@@ -50,7 +50,7 @@ it's a dozen lines.
 
 ```bash
 sudo mkdir -p /usr/share/nautilus-python/extensions
-sudo cp total_size_column.py /usr/share/nautilus-python/extensions/
+sudo cp show_folder_size.py /usr/share/nautilus-python/extensions/
 ```
 
 ## 3. Restart Nautilus
@@ -83,18 +83,18 @@ then switch to a size.
 ## 5. Choose where the cache lives (optional)
 
 Since v0.3.0 measured sizes are cached on disk so they survive a restart. The
-default is `~/.cache/nautilus-total-size/`. To change it, or to turn writing
+default is `~/.cache/show-folder-size-nautilus/`. To change it, or to turn writing
 off entirely:
 
 ```ini
-# ~/.config/nautilus-total-size.conf
+# ~/.config/show-folder-size-nautilus.conf
 cache_dir=/some/other/path
 # or, to disable on-disk caching completely:
 cache_dir=
 ```
 
 The `.deb` asks this at install time and records the system-wide default in
-`/etc/nautilus-total-size.conf`; the per-user file above overrides it.
+`/etc/show-folder-size-nautilus.conf`; the per-user file above overrides it.
 
 ## 6. Pre-index your drives (optional)
 
@@ -102,11 +102,11 @@ Fills the cache up front so sizes appear immediately rather than being
 measured as you browse:
 
 ```bash
-total-size-index          # asks which drives to index
+show-folder-size-index          # asks which drives to index
 nautilus -q               # pick up the new cache
 ```
 
-From a clone it's `./total-size-index`. `--help` lists the rest.
+From a clone it's `./show-folder-size-index`. `--help` lists the rest.
 
 ## 7. Version compatibility
 
@@ -131,20 +131,20 @@ nautilus --version
 The extension didn't load. Turn on tracing and watch the journal:
 
 ```bash
-touch ~/.config/nautilus-total-size-debug
+touch ~/.config/show-folder-size-nautilus-debug
 nautilus -q
 journalctl --user -f
 ```
 
 Python syntax errors, a missing `nautilus-python`, or a wrong
 `gi.require_version` all surface there as a traceback. Don't pipe through
-`grep total-size` — tracebacks don't contain that string, so it hides exactly
+`grep show-folder-size` — tracebacks don't contain that string, so it hides exactly
 what you're looking for. Delete the marker file when you're done.
 
 Also confirm the file is in the right place and readable:
 
 ```bash
-ls -l ~/.local/share/nautilus-python/extensions/total_size_column.py
+ls -l ~/.local/share/nautilus-python/extensions/show_folder_size.py
 ```
 
 ### Everything says `Calculating...` and never finishes
@@ -163,15 +163,15 @@ Compare against `du -sb --apparent-size` for a closer match.
 ### Uninstall
 
 ```bash
-rm ~/.local/share/nautilus-python/extensions/total_size_column.py
+rm ~/.local/share/nautilus-python/extensions/show_folder_size.py
 nautilus -q
 ```
 
 Since v0.3.0 there is also a cache to remove if you want it gone:
 
 ```bash
-rm -rf ~/.cache/nautilus-total-size
+rm -rf ~/.cache/show-folder-size-nautilus
 ```
 
-If you installed the `.deb`, `sudo apt purge nautilus-total-size` also removes
-`/etc/nautilus-total-size.conf`; a plain `remove` leaves it in place.
+If you installed the `.deb`, `sudo apt purge show-folder-size-nautilus` also removes
+`/etc/show-folder-size-nautilus.conf`; a plain `remove` leaves it in place.

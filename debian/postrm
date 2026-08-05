@@ -3,7 +3,7 @@
 set -e
 case "$1" in
     purge)
-        rm -f /etc/nautilus-total-size.conf
+        rm -f /etc/show-folder-size-nautilus.conf
         if [ -e /usr/share/debconf/confmodule ]; then
             . /usr/share/debconf/confmodule
             db_purge || true

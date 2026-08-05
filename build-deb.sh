@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build a .deb for nautilus-total-size.
+# Build a .deb for show-folder-size-nautilus.
 #
 # Needs only dpkg-deb (dpkg-dev), which Debian/Ubuntu already have.
-# Produces ./dist/nautilus-total-size_<version>_all.deb
+# Produces ./dist/show-folder-size-nautilus_<version>_all.deb
 #
 # The package installs one Python file system-wide to
 # /usr/share/nautilus-python/extensions/ and nothing else. It runs no
@@ -11,11 +11,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${HERE}/total_size_column.py"
-PKG="nautilus-total-size"
+SRC="${HERE}/show_folder_size.py"
+PKG="show-folder-size-nautilus"
 ARCH="all"
 MAINTAINER="doggylover314 <doggylover314@users.noreply.github.com>"
-HOMEPAGE="https://github.com/doggylover314/nautilus-total-size"
+HOMEPAGE="https://github.com/doggylover314/show-folder-size-nautilus"
 
 command -v dpkg-deb >/dev/null 2>&1 || {
     echo "error: dpkg-deb not found. Install it with: sudo apt install dpkg-dev" >&2
@@ -38,7 +38,7 @@ mkdir -p "${BUILD}/DEBIAN" \
          "${BUILD}/usr/share/doc/${PKG}"
 
 install -m 0644 "${SRC}" "${BUILD}/usr/share/nautilus-python/extensions/"
-install -m 0755 "${HERE}/total-size-index" "${BUILD}/usr/bin/total-size-index"
+install -m 0755 "${HERE}/show-folder-size-index" "${BUILD}/usr/bin/show-folder-size-index"
 install -m 0644 "${HERE}/README.md"  "${BUILD}/usr/share/doc/${PKG}/"
 install -m 0644 "${HERE}/INSTALL.md" "${BUILD}/usr/share/doc/${PKG}/"
 
@@ -69,12 +69,12 @@ Description: Total Size column for GNOME Files showing recursive folder sizes
  After installing, run "nautilus -q", then enable the column in List View via
  the view menu, Visible Columns.
  .
- The total-size-index command pre-computes sizes for whole drives so browsing
+ The show-folder-size-index command pre-computes sizes for whole drives so browsing
  them is instant from the first look.
 EOF
 
 # debconf asks where to keep the size cache and postinst records the answer in
-# /etc/nautilus-total-size.conf. This uses debconf rather than a bare `read`
+# /etc/show-folder-size-nautilus.conf. This uses debconf rather than a bare `read`
 # because package installs are frequently non-interactive (unattended-upgrades,
 # images, CI) and a prompt on stdin would hang them forever. debconf handles
 # preseeding and non-interactive frontends properly.

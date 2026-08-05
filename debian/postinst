@@ -1,25 +1,25 @@
 #!/bin/sh
-# Write the answer to /etc/nautilus-total-size.conf, which the extension
+# Write the answer to /etc/show-folder-size-nautilus.conf, which the extension
 # reads as its system-wide default. Users override it in their own config.
 set -e
 . /usr/share/debconf/confmodule
 
-CONF=/etc/nautilus-total-size.conf
+CONF=/etc/show-folder-size-nautilus.conf
 
 case "$1" in
     configure)
-        db_get nautilus-total-size/cache-dir || true
+        db_get show-folder-size-nautilus/cache-dir || true
         CACHE_DIR="$RET"
         cat > "$CONF" <<CONFEOF
-# Written by the nautilus-total-size package. Edit freely.
-# Per-user override: ~/.config/nautilus-total-size.conf
+# Written by the show-folder-size-nautilus package. Edit freely.
+# Per-user override: ~/.config/show-folder-size-nautilus.conf
 # An empty value disables on-disk caching (nothing is written).
 cache_dir=${CACHE_DIR}
 CONFEOF
         chmod 0644 "$CONF"
 
-        echo "nautilus-total-size: cache dir set to '${CACHE_DIR:-(disabled)}'"
-        echo "nautilus-total-size: run 'nautilus -q' to load the extension."
+        echo "show-folder-size-nautilus: cache dir set to '${CACHE_DIR:-(disabled)}'"
+        echo "show-folder-size-nautilus: run 'nautilus -q' to load the extension."
         ;;
 esac
 exit 0

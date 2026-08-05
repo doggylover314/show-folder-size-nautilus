@@ -26,10 +26,10 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   invalidate proved unreliable in 0.1.x, but a folder that silently never
   updates is worse than one redundant refresh.
 - Debug tracing can be enabled with the marker file
-  `~/.config/nautilus-total-size-debug`. `NAUTILUS_TOTAL_SIZE_DEBUG=1` is
+  `~/.config/show-folder-size-nautilus-debug`. `SHOW_FOLDER_SIZE_DEBUG=1` is
   unreliable because nautilus is D-Bus activated, so the variable often never
   reaches the process that loads the extension. Output goes to the journal:
-  `journalctl --user -f | grep total-size`.
+  `journalctl --user -f | grep show-folder-size`.
 
 ### Removed
 - Operation-handle tracking, `cancel_update()` bookkeeping and the
@@ -48,7 +48,7 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     pipe, and a non-blocking write then raises `BlockingIOError`, killing the
     worker permanently. Losing a debug line is fine; losing a worker is not.
     (This is also why the failure was invisible: the dying thread's traceback
-    doesn't contain "total-size", so `journalctl | grep total-size` hid it.)
+    doesn't contain "total-size", so `journalctl | grep show-folder-size` hid it.)
   - The worker loop body is now fully guarded, so nothing can escape and end
     a thread.
   - The pool heals itself: `_start_workers()` runs on every enqueue, prunes
@@ -75,7 +75,7 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   atomically (temp file + `os.replace`) so a crash mid-write cannot corrupt
   it; a corrupt or unreadable cache is ignored rather than raised. Location is
   configurable — env var, user config, system config, then the XDG default
-  `~/.cache/nautilus-total-size/`. **Setting it empty disables writing
+  `~/.cache/show-folder-size-nautilus/`. **Setting it empty disables writing
   entirely.**
 - **Filesystem monitoring.** Visited directories are watched with
   `GFileMonitor`; a change drops the cached total for that directory *and
@@ -84,11 +84,11 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the inotify limit, so watches are bounded (`MONITOR_LIMIT`, 256) and evicted
   LRU. Deep changes are therefore caught in recently-visited directories.
 - **`.deb` now asks where to store the cache**, via debconf, defaulting to
-  `~/.cache/nautilus-total-size`. debconf rather than a bare `read` because
+  `~/.cache/show-folder-size-nautilus`. debconf rather than a bare `read` because
   package installs are often non-interactive (unattended-upgrades, images, CI)
   and a stdin prompt would hang them. The answer is written to
-  `/etc/nautilus-total-size.conf` as the system default; users override it in
-  `~/.config/nautilus-total-size.conf`. Removed on purge, not on remove.
+  `/etc/show-folder-size-nautilus.conf` as the system default; users override it in
+  `~/.config/show-folder-size-nautilus.conf`. Removed on purge, not on remove.
 
 ### Changed
 - **The no-writes guarantee no longer holds** — this is the first version that
@@ -105,7 +105,7 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.4.0] - 2026-08-05
 
 ### Added
-- **`total-size-index`**, a standalone command that pre-computes folder sizes
+- **`show-folder-size-index`**, a standalone command that pre-computes folder sizes
   for whole drives and writes them into the cache the extension reads, so
   browsing is instant from the first look instead of measuring on demand.
   Run bare it lists mounted local filesystems and asks which to index;
@@ -124,7 +124,47 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     drift apart.
   - Verified to agree with `Gio.measure_disk_usage()` at every level of the
     tree, not just at the roots.
-- The `.deb` installs it to `/usr/bin/total-size-index`.
+- The `.deb` installs it to `/usr/bin/show-folder-size-index`.
+
+## [0.5.0] - 2026-08-05
+
+Project renamed from `nautilus-total-size` to **`show-folder-size-nautilus`**.
+Nothing about the behaviour changed; every name did.
+
+### Changed
+- Repository is now `github.com/doggylover314/show-folder-size-nautilus`.
+  GitHub redirects the old URL, but update your remotes and bookmarks.
+- Package: `nautilus-total-size` -> `show-folder-size-nautilus`
+- Extension file: `total_size_column.py` -> `show_folder_size.py`
+- Command: `total-size-index` -> `show-folder-size-index`
+- Class: `TotalSizeColumn` -> `ShowFolderSizeColumn`
+- Cache: `~/.cache/nautilus-total-size/` -> `~/.cache/show-folder-size-nautilus/`
+- Config: `~/.config/nautilus-total-size.conf` and
+  `/etc/nautilus-total-size.conf` -> `~/.config/show-folder-size-nautilus.conf`
+  and `/etc/show-folder-size-nautilus.conf`
+- Debug marker: `~/.config/nautilus-total-size-debug` ->
+  `~/.config/show-folder-size-nautilus-debug`
+- Environment: `NAUTILUS_TOTAL_SIZE_CACHE` -> `SHOW_FOLDER_SIZE_CACHE`,
+  `NAUTILUS_TOTAL_SIZE_DEBUG` -> `SHOW_FOLDER_SIZE_DEBUG`
+- Log prefix: `[total-size]` -> `[show-folder-size]`
+- debconf namespace: `nautilus-total-size/cache-dir` ->
+  `show-folder-size-nautilus/cache-dir`
+
+### Not changed
+- **The column is still labelled "Total Size"**, and its identifier is still
+  `NautilusPython::total_size`. That is what the column *means* in the file
+  manager, which is a different thing from what the project is called, and
+  changing the identifier would silently un-tick the column for anyone who
+  had already enabled it.
+
+### Upgrading from 0.4.x
+The cache and config live at new paths, so the old ones are ignored rather
+than migrated. Remove them if you want them gone:
+
+```bash
+rm -rf ~/.cache/nautilus-total-size ~/.config/nautilus-total-size.conf
+sudo apt purge nautilus-total-size      # if you installed the old package
+```
 
 ## [Unreleased]
 
@@ -185,7 +225,7 @@ on Ubuntu (ext4).
 - Human-readable base-1024 formatting (B/KB/MB/GB/TB/PB).
 - Symlinks never followed (no loops, no double-counting); hard links counted
   once via `(st_dev, st_ino)`.
-- Debug tracing via `NAUTILUS_TOTAL_SIZE_DEBUG=1`.
+- Debug tracing via `SHOW_FOLDER_SIZE_DEBUG=1`.
 - Read-only by construction: only `os.walk`, `os.stat`, `os.lstat` — no
   writes, no network, no subprocesses.
 - Install guide, `install.sh` helper, MIT license.
@@ -198,10 +238,11 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.4.0
-[0.3.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.3.0
-[0.2.2]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.2
-[0.2.1]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.1
-[0.2.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.0
-[0.1.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.1.0
+[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.5.0
+[0.4.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.4.0
+[0.3.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.3.0
+[0.2.2]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.2.2
+[0.2.1]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.2.1
+[0.2.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.2.0
+[0.1.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.1.0

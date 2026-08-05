@@ -4,7 +4,7 @@
 set -euo pipefail
 
 DEST="${HOME}/.local/share/nautilus-python/extensions"
-FILE="total_size_column.py"
+FILE="show_folder_size.py"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${FILE}"
 
 if [[ "${1:-}" == "--uninstall" ]]; then

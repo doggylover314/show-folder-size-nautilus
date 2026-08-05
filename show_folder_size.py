@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-total_size_column.py -- a "Total Size" column for GNOME Files (Nautilus) 46.
+show_folder_size.py -- a "Total Size" column for GNOME Files (Nautilus) 46.
 
 WHAT IT DOES
 ------------
@@ -27,7 +27,7 @@ extension wrote nothing at all.  That is no longer true: since v0.3.0 it
 writes exactly ONE file, its size cache.  Everything else is unchanged.
 
   * Writes exactly one file: the size cache (see CACHE_PATH below, by default
-    ~/.cache/nautilus-total-size/sizes.json).  It is written atomically --
+    ~/.cache/show-folder-size-nautilus/sizes.json).  It is written atomically --
     a temporary file in the same directory, then os.replace() -- so a crash
     mid-write cannot corrupt it.  It contains directory paths, their
     modification times and their sizes in bytes.  Nothing else.  It is safe to
@@ -59,10 +59,10 @@ CONFIGURATION
 -------------
 Where the cache lives, in order of precedence:
 
-  1. the NAUTILUS_TOTAL_SIZE_CACHE environment variable
-  2. cache_dir= in ~/.config/nautilus-total-size.conf
-  3. cache_dir= in /etc/nautilus-total-size.conf   (set by the .deb installer)
-  4. $XDG_CACHE_HOME/nautilus-total-size, i.e. ~/.cache/nautilus-total-size
+  1. the SHOW_FOLDER_SIZE_CACHE environment variable
+  2. cache_dir= in ~/.config/show-folder-size-nautilus.conf
+  3. cache_dir= in /etc/show-folder-size-nautilus.conf   (set by the .deb installer)
+  4. $XDG_CACHE_HOME/show-folder-size-nautilus, i.e. ~/.cache/show-folder-size-nautilus
 
 Setting any of them to the empty string disables the on-disk cache entirely:
 nothing is written, and sizes are remembered only for the current session.
@@ -154,11 +154,11 @@ DEBUGGING
 ---------
 Tracing goes to stderr and can be switched on two ways:
 
-  * NAUTILUS_TOTAL_SIZE_DEBUG=1 in nautilus' environment -- but note this is
-    easy to lose: nautilus is D-Bus activated, so `NAUTILUS_TOTAL_SIZE_DEBUG=1
+  * SHOW_FOLDER_SIZE_DEBUG=1 in nautilus' environment -- but note this is
+    easy to lose: nautilus is D-Bus activated, so `SHOW_FOLDER_SIZE_DEBUG=1
     nautilus` often just hands your request to a nautilus that is already
     running with a different environment, and the variable never arrives.
-  * creating the marker file ~/.config/nautilus-total-size-debug (its contents
+  * creating the marker file ~/.config/show-folder-size-nautilus-debug (its contents
     are irrelevant; only its existence is checked, and only at import).  This
     survives however nautilus happens to get started, which makes it the
     reliable option.
@@ -166,9 +166,9 @@ Tracing goes to stderr and can be switched on two ways:
 Either way the output lands in the session journal, so with the marker file in
 place just run:
 
-    journalctl --user -f | grep total-size
+    journalctl --user -f | grep show-folder-size
 
-Install:  ~/.local/share/nautilus-python/extensions/total_size_column.py
+Install:  ~/.local/share/nautilus-python/extensions/show_folder_size.py
 Requires: nautilus-python (python3-nautilus) for libnautilus-extension 4.0.
 """
 
@@ -187,7 +187,7 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -207,8 +207,8 @@ SAVE_DELAY_S = 10         # quiet period before the cache is written to disk
 
 CONFIG_FILES = (
     os.path.join(os.path.expanduser("~"), ".config",
-                 "nautilus-total-size.conf"),
-    "/etc/nautilus-total-size.conf",
+                 "show-folder-size-nautilus.conf"),
+    "/etc/show-folder-size-nautilus.conf",
 )
 
 
@@ -219,7 +219,7 @@ def _configured_cache_dir():
     what the .deb installer writes), then the XDG default.  Read-only: this
     only ever opens config files for reading.
     """
-    from_env = os.environ.get("NAUTILUS_TOTAL_SIZE_CACHE")
+    from_env = os.environ.get("SHOW_FOLDER_SIZE_CACHE")
     if from_env is not None:
         return from_env.strip()
 
@@ -238,7 +238,7 @@ def _configured_cache_dir():
 
     xdg = os.environ.get("XDG_CACHE_HOME") or \
         os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(xdg, "nautilus-total-size")
+    return os.path.join(xdg, "show-folder-size-nautilus")
 
 
 CACHE_DIR = _configured_cache_dir()
@@ -246,12 +246,12 @@ CACHE_PATH = os.path.join(CACHE_DIR, "sizes.json") if CACHE_DIR else ""
 CACHE_FORMAT = 1
 
 _DEBUG_MARKER = os.path.join(
-    os.path.expanduser("~"), ".config", "nautilus-total-size-debug")
+    os.path.expanduser("~"), ".config", "show-folder-size-nautilus-debug")
 
 # The marker file is checked because the environment variable is unreliable:
 # nautilus is D-Bus activated, so the variable frequently never reaches the
 # process that actually loads this extension.  os.path.exists() is a read.
-_DEBUG = bool(os.environ.get("NAUTILUS_TOTAL_SIZE_DEBUG")) or \
+_DEBUG = bool(os.environ.get("SHOW_FOLDER_SIZE_DEBUG")) or \
     os.path.exists(_DEBUG_MARKER)
 
 
@@ -266,7 +266,7 @@ def _log(message):
     if not _DEBUG:
         return
     try:
-        print("[total-size] %s" % message, file=sys.stderr, flush=True)
+        print("[show-folder-size] %s" % message, file=sys.stderr, flush=True)
     except Exception:
         pass
 
@@ -434,7 +434,7 @@ def save_cache(entries):
 
 # --- the extension ----------------------------------------------------------
 
-class TotalSizeColumn(GObject.GObject,
+class ShowFolderSizeColumn(GObject.GObject,
                       Nautilus.ColumnProvider,
                       Nautilus.InfoProvider):
     """Registers the column and fills it in, lazily and off the main thread."""
@@ -602,7 +602,7 @@ class TotalSizeColumn(GObject.GObject,
         while len(self._workers) < WORKER_COUNT:
             thread = threading.Thread(
                 target=self._worker_loop,
-                name="total-size-%d" % len(self._workers),
+                name="show-folder-size-%d" % len(self._workers),
                 daemon=True,
             )
             thread.start()
@@ -685,7 +685,7 @@ class TotalSizeColumn(GObject.GObject,
         # not something to do in the middle of the file manager's event loop.
         snapshot = OrderedDict(self._cache)
         threading.Thread(target=save_cache, args=(snapshot,),
-                         name="total-size-save", daemon=True).start()
+                         name="show-folder-size-save", daemon=True).start()
         return GLib.SOURCE_REMOVE
 
     # -- filesystem monitoring -----------------------------------------------
@@ -777,7 +777,7 @@ class TotalSizeColumn(GObject.GObject,
 # folder is genuinely slow" from "measuring is fast but Nautilus never shows
 # the result":
 #
-#     python3 total_size_column.py /path/to/big/folder
+#     python3 show_folder_size.py /path/to/big/folder
 #
 # If this prints a size in a couple of seconds but the column still says
 # "Calculating...", the bug is in delivery, not in measurement.
