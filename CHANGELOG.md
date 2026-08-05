@@ -36,6 +36,38 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measurement `Cancellable`. With nothing ever reporting `IN_PROGRESS` there
   is no operation for Nautilus to cancel, so all of it was dead weight.
 
+## [0.2.2] - 2026-08-05
+
+### Fixed
+- **The worker pool could die silently, after which nothing was ever
+  measured again.** Reported as folders inside a directory queueing and never
+  producing a result — the log showed `queued` lines with no matching
+  `measured` lines. Three separate hardening changes:
+  - `_log()` can no longer raise. It is called from worker threads and writes
+    to a stderr pipe that feeds the journal; a burst of logging can fill that
+    pipe, and a non-blocking write then raises `BlockingIOError`, killing the
+    worker permanently. Losing a debug line is fine; losing a worker is not.
+    (This is also why the failure was invisible: the dying thread's traceback
+    doesn't contain "total-size", so `journalctl | grep total-size` hid it.)
+  - The worker loop body is now fully guarded, so nothing can escape and end
+    a thread.
+  - The pool heals itself: `_start_workers()` runs on every enqueue, prunes
+    dead threads and tops back up to `WORKER_COUNT`.
+
+### Added
+- A watchdog re-queues any job outstanding longer than `STUCK_SECONDS` (45s,
+  orders of magnitude clear of the ~1s a real measurement takes) and logs it.
+  It stops when the queue drains and leaves no state behind.
+- Debug logging now records when a worker picks up a job (`start <path>`), so
+  "queued but never measured" is distinguishable from "measuring slowly".
+
+### Changed
+- Corrected an overstated claim in the v0.2.0 notes. GIL contention was *not*
+  starving Nautilus' main thread: measured properly, `measure_disk_usage`
+  releases the GIL (four concurrent measurements take 0.14s against 0.11s for
+  one, and the main thread runs Python at full speed throughout). Switching to
+  GIO was justified by speed alone.
+
 ## [Unreleased]
 
 ### Planned
@@ -108,7 +140,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.2
 [0.2.1]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.1
 [0.2.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.0
 [0.1.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.1.0

@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached in memory, so browsing
 never blocks. While a folder is being measured the column reads
 `Calculating...`.
 
-> **Status: early / v0.2.1.** Measurement now uses the same GIO call as
+> **Status: early / v0.2.2.** Measurement now uses the same GIO call as
 > Nautilus' Properties window, and sizes are formatted exactly like the
 > built-in Size column. See [Known issues](#known-issues) before installing.
 
@@ -72,7 +72,7 @@ Full instructions, distro package names and troubleshooting:
 
 ## Is it safe? (read-only guarantee)
 
-As of **v0.2.1** this extension only ever *reads* the filesystem. Sizes come
+As of **v0.2.2** this extension only ever *reads* the filesystem. Sizes come
 from `Gio.File.measure_disk_usage()` (the same call Nautilus' Properties
 window uses), falling back to `os.walk` / `os.stat` / `os.lstat`. There is:
 
@@ -136,6 +136,9 @@ touch ~/.config/nautilus-total-size-debug
 nautilus -q
 journalctl --user -f | grep total-size
 ```
+
+Note that `grep total-size` also hides Python tracebacks, which don't contain
+that string. If something stops working entirely, drop the grep.
 
 Each queued folder, each completed measurement (with timing) and any Python
 import error is logged.

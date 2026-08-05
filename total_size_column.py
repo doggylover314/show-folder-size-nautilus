@@ -52,12 +52,12 @@ WHY IT IS BUILT THIS WAY (three bugs' worth of hard-won detail)
   every single file.  Follow the host, don't invent a convention.
 
 * Measurement uses Gio.File.measure_disk_usage() rather than a Python walk.
-  Two reasons.  It is ~6x faster (measured: 189 GB / 314k files in 0.8s vs
-  4.9s).  More importantly it is one C call that releases the GIL for its
-  whole duration.  Python worker threads running os.walk hold the GIL between
-  syscalls, and Nautilus calls back into Python for *every* file it displays,
-  so the workers were throttling the very main thread that had to render their
-  results.
+  It is ~6x faster (measured: 189 GB / 314k files in 0.8s vs 4.9s) and it
+  releases the GIL properly -- four concurrent measurements take 0.14s against
+  0.11s for one, and a measuring worker leaves the main thread running Python
+  at full speed.  (An earlier revision of this comment claimed GIL contention
+  from os.walk was starving Nautilus' main thread.  That was measured badly
+  and overstated: the speed is the honest reason, not the contention.)
 
 * Results are posted to the main thread with GLib.idle_add() at
   PRIORITY_DEFAULT, NOT PRIORITY_DEFAULT_IDLE.  A busy Nautilus main loop can
@@ -147,7 +147,7 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -160,6 +160,8 @@ WORKER_COUNT = 4          # background threads driving the measurement
 CACHE_LIMIT = 4096        # max remembered (path, mtime) -> text entries
 REFRESH_ATTEMPTS = 4      # how many times to nudge Nautilus to re-read a value
 REFRESH_INTERVAL_MS = 750
+WATCHDOG_INTERVAL_S = 5   # how often to look for lost work
+STUCK_SECONDS = 45        # a measurement taking this long was lost, not slow
 
 _DEBUG_MARKER = os.path.join(
     os.path.expanduser("~"), ".config", "nautilus-total-size-debug")
@@ -172,8 +174,19 @@ _DEBUG = bool(os.environ.get("NAUTILUS_TOTAL_SIZE_DEBUG")) or \
 
 
 def _log(message):
-    if _DEBUG:
+    """Trace to stderr.  Must never raise, and never on the caller's account.
+
+    This is called from worker threads, and an exception here would kill the
+    worker for good.  stderr is a pipe to the journal; a burst of logging can
+    fill it, and if nautilus left it non-blocking the write raises
+    BlockingIOError.  Losing a debug line is fine.  Losing a worker is not.
+    """
+    if not _DEBUG:
+        return
+    try:
         print("[total-size] %s" % message, file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 # --- measurement ------------------------------------------------------------
@@ -263,7 +276,9 @@ class TotalSizeColumn(GObject.GObject,
         # _work_queue, which is the thread-safe handoff to the workers.
         self._cache = OrderedDict()   # (path, mtime_ns) -> formatted string
         self._jobs = {}               # (path, mtime_ns) -> [FileInfo, ...]
+        self._queued_at = {}          # (path, mtime_ns) -> monotonic seconds
         self._awaiting_reread = set()  # keys nudged but not yet re-asked for
+        self._watchdog_id = None
         self._work_queue = queue.SimpleQueue()
         self._workers = []
 
@@ -361,17 +376,55 @@ class TotalSizeColumn(GObject.GObject,
             return
 
         self._jobs[key] = [file_info]
+        self._queued_at[key] = time.monotonic()
         self._start_workers()
         self._work_queue.put(key)
+        self._start_watchdog()
         _log("queued %s" % (key[0],))
 
+    def _start_watchdog(self):
+        if self._watchdog_id is None:
+            self._watchdog_id = GLib.timeout_add_seconds(
+                WATCHDOG_INTERVAL_S, self._watchdog)
+
+    def _watchdog(self):
+        """Re-queue jobs that vanished, and stop once the queue drains.
+
+        Belt and braces for the failure this version is about: if a job has
+        been outstanding far longer than any real measurement takes, the work
+        was lost rather than delayed.  Measurements here run in about a
+        second, so STUCK_SECONDS is orders of magnitude clear of normal --
+        this should never fire, and if it does the log says so plainly.
+        """
+        if not self._jobs:
+            self._watchdog_id = None
+            return GLib.SOURCE_REMOVE
+
+        now = time.monotonic()
+        for key, queued_at in list(self._queued_at.items()):
+            if key not in self._jobs or now - queued_at < STUCK_SECONDS:
+                continue
+            _log("job for %s stuck for %.0fs; re-queueing (%d live workers)"
+                 % (key[0], now - queued_at, len(self._workers)))
+            self._queued_at[key] = now
+            self._start_workers()
+            self._work_queue.put(key)
+
+        return GLib.SOURCE_CONTINUE
+
     def _start_workers(self):
-        if self._workers:
-            return
-        for index in range(WORKER_COUNT):
+        """Ensure WORKER_COUNT live workers, replacing any that have died.
+
+        Called on every enqueue rather than once, so the pool heals itself.
+        A pool that silently shrinks to zero looks exactly like "the extension
+        stopped working": jobs queue up and nothing ever measures them, with
+        no error in sight.  That happened, so it is now impossible.
+        """
+        self._workers = [t for t in self._workers if t.is_alive()]
+        while len(self._workers) < WORKER_COUNT:
             thread = threading.Thread(
                 target=self._worker_loop,
-                name="total-size-%d" % index,
+                name="total-size-%d" % len(self._workers),
                 daemon=True,
             )
             thread.start()
@@ -382,26 +435,35 @@ class TotalSizeColumn(GObject.GObject,
 
         Touches no GTK/Nautilus object -- the only crossing point back is
         GLib.idle_add(), which is documented as thread-safe.
+
+        The entire body is guarded.  Anything that escapes here kills this
+        thread permanently and silently, and four such deaths leave the queue
+        filling up forever.  Nothing is worth that, so nothing is allowed out.
         """
         while True:
-            key = self._work_queue.get()
-            path = key[0]
-            started = time.monotonic()
             try:
-                text = format_size(directory_size(path))
-            except GLib.Error as error:
-                _log("measure of %s failed: %s" % (path, error.message))
-                text = ""
-            except Exception as exc:
-                _log("measure of %s failed: %r" % (path, exc))
-                text = ""
+                key = self._work_queue.get()
+                path = key[0]
+                started = time.monotonic()
+                _log("start %s" % (path,))
 
-            _log("measured %s in %.2fs -> %s"
-                 % (path, time.monotonic() - started, text))
-            # PRIORITY_DEFAULT, not PRIORITY_DEFAULT_IDLE: a busy Nautilus
-            # main loop will starve idle-priority callbacks indefinitely.
-            GLib.idle_add(self._on_result, key, text,
-                          priority=GLib.PRIORITY_DEFAULT)
+                try:
+                    text = format_size(directory_size(path))
+                except GLib.Error as error:
+                    _log("measure of %s failed: %s" % (path, error.message))
+                    text = ""
+                except Exception as exc:
+                    _log("measure of %s failed: %r" % (path, exc))
+                    text = ""
+
+                _log("measured %s in %.2fs -> %s"
+                     % (path, time.monotonic() - started, text))
+                # PRIORITY_DEFAULT, not PRIORITY_DEFAULT_IDLE: a busy Nautilus
+                # main loop will starve idle-priority callbacks indefinitely.
+                GLib.idle_add(self._on_result, key, text,
+                              priority=GLib.PRIORITY_DEFAULT)
+            except Exception as exc:                  # never let a worker die
+                _log("worker recovered from %r" % (exc,))
 
     def _on_result(self, key, text):
         """Main thread: cache the answer, then get Nautilus to re-read it."""
@@ -410,6 +472,7 @@ class TotalSizeColumn(GObject.GObject,
         while len(self._cache) > CACHE_LIMIT:
             self._cache.popitem(last=False)
 
+        self._queued_at.pop(key, None)
         file_infos = self._jobs.pop(key, [])
         for file_info in file_infos:
             file_info.add_string_attribute(ATTRIBUTE, text)
