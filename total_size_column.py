@@ -30,30 +30,36 @@ This extension is READ-ONLY with respect to your system:
     directories are never descended into, so there are no link loops and no
     directory tree is counted twice.  Symlinks to files are stat'ed with
     follow_symlinks=False and skipped, so link targets are not double-counted.
-  * Imports are stdlib + PyGObject only: os, stat, queue, threading,
+  * Imports are stdlib + PyGObject only: os, stat, sys, queue, threading,
     collections, gi (GObject/GLib/Nautilus).  No third-party dependencies.
 
 The only side effects are: CPU/IO from directory traversal, memory for the
 result cache (bounded, see CACHE_LIMIT), and the text drawn in the column.
 
-IMPLEMENTATION NOTES
---------------------
-* Nautilus.InfoProvider has an async protocol (return OperationResult
-  .IN_PROGRESS, then call info_provider_update_complete_invoke() with the
-  handle you were given).  This extension deliberately does NOT use it: that
-  protocol requires tracking opaque operation handles across threads and
-  correctly honouring cancel_update(), and invoking a completion on a handle
-  Nautilus has already freed can crash the file manager.  Instead every
-  update_file_info() call returns immediately (COMPLETE) with either the
-  cached size or "Calculating...", and when a background walk finishes we call
-  FileInfo.invalidate_extension_info() on the main thread, which makes
-  Nautilus re-ask us -- and that second ask hits the cache.  Same user-visible
-  behaviour, no handle lifetime hazards.
-* Results are handed back to the GTK main thread with GLib.idle_add(); the
-  worker threads never touch a Nautilus object.
-* Work is served by a small fixed thread pool rather than one thread per
-  folder, so opening a directory containing hundreds of subfolders doesn't
-  spawn hundreds of threads.  Requests are still fully concurrent with the UI.
+HOW THE ASYNC UPDATE WORKS
+--------------------------
+Nautilus.InfoProvider has a proper asynchronous protocol for exactly this
+situation -- a value that isn't ready yet:
+
+  1. update_file_info_full() writes the "Calculating..." placeholder, stashes
+     the (provider, handle, closure) triple it was handed, and returns
+     OperationResult.IN_PROGRESS.
+  2. A worker thread walks the tree.  It touches no GTK or Nautilus object.
+  3. The worker hands the total back to the main thread with GLib.idle_add().
+     On the main thread we write the real attribute and then call
+     Nautilus.info_provider_update_complete_invoke(closure, provider, handle,
+     COMPLETE), which tells Nautilus the value it was waiting on has landed.
+  4. cancel_update() drops the handle if Nautilus loses interest first.  This
+     matters: completing a handle Nautilus has already freed is a
+     use-after-free, so a handle is only ever completed once and only while
+     it is still registered in self._waiters.
+
+v0.1.0 instead returned COMPLETE immediately and called
+FileInfo.invalidate_extension_info() when the walk finished, hoping Nautilus
+would re-ask and hit the cache.  That refresh did not fire reliably -- most
+folders sat on "Calculating..." forever -- which is why this version uses the
+real protocol.  The invalidate path survives only as a fallback for
+nautilus-python builds that call the old one-argument update_file_info().
 
 KNOWN LIMITATIONS (by design, called out so they don't surprise you)
 --------------------------------------------------------------------
@@ -91,9 +97,9 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import GLib, GObject, Nautilus  # noqa: E402
 
-# --- tunables ---------------------------------------------------------------
+__version__ = "0.1.1"
 
-__version__ = "0.1.0"
+# --- tunables ---------------------------------------------------------------
 
 COLUMN_ID = "NautilusPython::total_size"
 ATTRIBUTE = "total_size"
@@ -104,6 +110,10 @@ WORKER_COUNT = 4       # background threads doing os.walk
 CACHE_LIMIT = 4096     # max remembered (path, mtime) -> text entries
 
 _DEBUG = bool(os.environ.get("NAUTILUS_TOTAL_SIZE_DEBUG"))
+
+# Present on libnautilus-extension 4.0; guarded so a build without it falls
+# back to the invalidate-and-hope path rather than failing to load at all.
+_HAS_ASYNC = hasattr(Nautilus, "info_provider_update_complete_invoke")
 
 
 def _log(message):
@@ -168,6 +178,24 @@ def directory_size(path):
 
 # --- the extension ----------------------------------------------------------
 
+class _Waiter(object):
+    """One outstanding request for a folder's size.
+
+    `handle`/`closure`/`provider` are set for async requests and completed
+    exactly once.  Legacy (non-async) requests carry only `file_info` and are
+    refreshed with invalidate_extension_info() instead.
+    """
+
+    __slots__ = ("file_info", "provider", "handle", "closure", "is_async")
+
+    def __init__(self, file_info, provider=None, handle=None, closure=None):
+        self.file_info = file_info
+        self.provider = provider
+        self.handle = handle
+        self.closure = closure
+        self.is_async = handle is not None
+
+
 class TotalSizeColumn(GObject.GObject,
                       Nautilus.ColumnProvider,
                       Nautilus.InfoProvider):
@@ -178,7 +206,7 @@ class TotalSizeColumn(GObject.GObject,
         # Everything below is touched only from the GTK main thread except
         # _work_queue, which is the thread-safe handoff to the workers.
         self._cache = OrderedDict()   # (path, mtime_ns) -> formatted string
-        self._pending = {}            # (path, mtime_ns) -> [FileInfo, ...]
+        self._waiters = {}            # (path, mtime_ns) -> [_Waiter, ...]
         self._work_queue = queue.SimpleQueue()
         self._workers = []
 
@@ -199,70 +227,119 @@ class TotalSizeColumn(GObject.GObject,
         return (column,)
 
     # -- Nautilus.InfoProvider ----------------------------------------------
-    #
-    # Both spellings are implemented so the extension works regardless of
-    # which one this nautilus-python build calls.  Neither ever returns
-    # IN_PROGRESS -- see IMPLEMENTATION NOTES at the top of the file.
-
-    def update_file_info(self, file_info):
-        self._fill_in(file_info)
 
     def update_file_info_full(self, provider, handle, closure, file_info):
-        self._fill_in(file_info)
-        return Nautilus.OperationResult.COMPLETE
-
-    def _fill_in(self, file_info):
+        """Async entry point used by libnautilus-extension 4.0."""
         try:
-            text = self._text_for(file_info)
+            text, key = self._resolve(file_info)
         except Exception as exc:                      # never break the view
             _log("update failed: %r" % (exc,))
-            text = ""
+            file_info.add_string_attribute(ATTRIBUTE, "")
+            return Nautilus.OperationResult.COMPLETE
+
         file_info.add_string_attribute(ATTRIBUTE, text)
 
-    def _text_for(self, file_info):
+        if key is None:                               # answer already known
+            return Nautilus.OperationResult.COMPLETE
+
+        if not _HAS_ASYNC:                            # very old binding
+            self._add_waiter(key, _Waiter(file_info))
+            return Nautilus.OperationResult.COMPLETE
+
+        self._add_waiter(key, _Waiter(file_info, provider, handle, closure))
+        return Nautilus.OperationResult.IN_PROGRESS
+
+    def update_file_info(self, file_info):
+        """Legacy entry point: no handle, so refresh via invalidation."""
+        try:
+            text, key = self._resolve(file_info)
+        except Exception as exc:
+            _log("update failed: %r" % (exc,))
+            file_info.add_string_attribute(ATTRIBUTE, "")
+            return
+
+        file_info.add_string_attribute(ATTRIBUTE, text)
+        if key is not None:
+            self._add_waiter(key, _Waiter(file_info))
+
+    def cancel_update(self, provider, handle):
+        """Nautilus no longer wants this value; drop the handle unused.
+
+        After this returns, `handle` may be freed by Nautilus, so it must
+        never be passed to update_complete_invoke().  Dropping the waiter here
+        is what makes that guarantee.
+        """
+        for key, waiters in list(self._waiters.items()):
+            remaining = [w for w in waiters if not self._same_handle(w, handle)]
+            if len(remaining) == len(waiters):
+                continue
+            if remaining:
+                self._waiters[key] = remaining
+            else:
+                # Nobody is waiting any more.  The walk itself is left to
+                # finish -- its result still populates the cache, which makes
+                # the next visit to this folder instant.
+                del self._waiters[key]
+            _log("cancelled a waiter for %s" % (key[0],))
+            return
+
+    @staticmethod
+    def _same_handle(waiter, handle):
+        if not waiter.is_async:
+            return False
+        try:
+            return waiter.handle == handle
+        except Exception:
+            return waiter.handle is handle
+
+    # -- value resolution ----------------------------------------------------
+
+    def _resolve(self, file_info):
+        """Return (text, key).
+
+        `key` is None when the text is final; otherwise it identifies the
+        pending job the caller should attach a waiter to.
+        """
         if file_info.get_uri_scheme() != "file":
-            return ""
+            return "", None
 
         location = file_info.get_location()
         path = location.get_path() if location is not None else None
         if not path:
-            return ""
+            return "", None
 
         try:
             info = os.lstat(path)
         except OSError:
-            return ""
+            return "", None
 
         mode = info.st_mode
         if stat.S_ISLNK(mode):
-            return ""                                  # don't follow links
+            return "", None                            # don't follow links
         if stat.S_ISREG(mode):
-            return format_size(info.st_size)           # plain file: own size
+            return format_size(info.st_size), None     # plain file: own size
         if not stat.S_ISDIR(mode):
-            return ""                                  # device, fifo, socket
+            return "", None                            # device, fifo, socket
 
         key = (path, info.st_mtime_ns)
 
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
-            return cached
+            return cached, None
 
-        self._enqueue(key, file_info)
-        return PENDING_TEXT
+        return PENDING_TEXT, key
 
     # -- background work -----------------------------------------------------
 
-    def _enqueue(self, key, file_info):
-        """Queue a walk for `key`, or attach to one already in flight."""
-        waiters = self._pending.get(key)
-        if waiters is not None:
-            # Same folder already being measured (e.g. a second view of it).
-            if file_info not in waiters:
-                waiters.append(file_info)
+    def _add_waiter(self, key, waiter):
+        """Attach `waiter` to the job for `key`, starting it if needed."""
+        existing = self._waiters.get(key)
+        if existing is not None:
+            existing.append(waiter)          # already being measured
             return
 
-        self._pending[key] = [file_info]
+        self._waiters[key] = [waiter]
         self._start_workers()
         self._work_queue.put(key)
         _log("queued %s" % (key[0],))
@@ -297,16 +374,26 @@ class TotalSizeColumn(GObject.GObject,
                           priority=GLib.PRIORITY_DEFAULT_IDLE)
 
     def _on_result(self, key, text):
-        """Main thread: cache the answer and ask Nautilus to re-read it."""
+        """Main thread: cache the answer and release everyone waiting on it."""
         self._cache[key] = text
         self._cache.move_to_end(key)
         while len(self._cache) > CACHE_LIMIT:
             self._cache.popitem(last=False)
 
-        for file_info in self._pending.pop(key, ()):
-            # Makes Nautilus call update_file_info() again for this file; that
-            # call hits the cache above and returns the real size immediately.
-            file_info.invalidate_extension_info()
+        for waiter in self._waiters.pop(key, ()):
+            try:
+                waiter.file_info.add_string_attribute(ATTRIBUTE, text)
+                if waiter.is_async:
+                    Nautilus.info_provider_update_complete_invoke(
+                        waiter.closure,
+                        waiter.provider,
+                        waiter.handle,
+                        Nautilus.OperationResult.COMPLETE,
+                    )
+                else:
+                    waiter.file_info.invalidate_extension_info()
+            except Exception as exc:
+                _log("completing %s failed: %r" % (key[0], exc))
 
         _log("%s -> %s" % (key[0], text))
         return GLib.SOURCE_REMOVE
