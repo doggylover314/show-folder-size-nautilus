@@ -65,15 +65,34 @@ WHY IT IS BUILT THIS WAY (three bugs' worth of hard-won detail)
   likeliest reason early versions left folders on "Calculating..." with the
   walk long since finished.
 
-* Delivery uses the real asynchronous InfoProvider protocol:
-  update_file_info_full() stashes the (provider, handle, closure) triple and
-  returns OperationResult.IN_PROGRESS; when the measurement lands we write the
-  attribute and call info_provider_update_complete_invoke().  cancel_update()
-  drops the handle so a handle Nautilus has already freed is never completed
-  (that would be a use-after-free).  The older
-  "return COMPLETE and invalidate_extension_info() later" trick survives only
-  as a fallback for bindings that call the legacy one-argument
-  update_file_info().
+* Delivery NEVER returns OperationResult.IN_PROGRESS.  Every update returns
+  COMPLETE immediately -- with the real size if we know it, otherwise with the
+  "Calculating..." placeholder -- and when the measurement lands we write the
+  attribute and call FileInfo.invalidate_extension_info(), which makes Nautilus
+  re-ask.  That second ask hits the cache and renders the number.
+
+  This is the third delivery design in this file, so it is worth writing down
+  why the obvious one is not used.  The asynchronous protocol
+  (return IN_PROGRESS, keep the operation handle, later call
+  info_provider_update_complete_invoke()) is the documented approach and looks
+  correct, but in practice the completion never reached the view here: a
+  100 GB folder measured in well under a second and still sat on
+  "Calculating..." indefinitely.  Worse, an IN_PROGRESS that never completes
+  is unrecoverable -- Nautilus is left waiting on a promise nothing will keep,
+  and there is no timeout.  Returning COMPLETE cannot wedge anything: the
+  worst case is a stale-looking cell that the next refresh fixes.  Given a
+  choice between a protocol that is theoretically righter and one that
+  degrades safely when it goes wrong, take the one that degrades safely.
+
+  Because nothing ever returns IN_PROGRESS, Nautilus has no operation to
+  cancel, so cancel_update() has nothing to do and the measurement Cancellable
+  that used to hang off it is gone with it.
+
+* The invalidate is retried a few times (see REFRESH_ATTEMPTS).  Retrying
+  stops the moment Nautilus asks for the value again -- a cache hit clears the
+  key -- so this self-terminates rather than looping.  It exists because a
+  single invalidate proved unreliable in earlier versions, and a folder that
+  silently never updates is worse than one extra no-op refresh.
 
 KNOWN LIMITATIONS (by design, called out so they don't surprise you)
 --------------------------------------------------------------------
@@ -93,8 +112,23 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
 * Only local ("file://") locations are measured; other URI schemes get a blank
   cell rather than a very slow recursive walk over the network.
 
-Set NAUTILUS_TOTAL_SIZE_DEBUG=1 in nautilus' environment for stderr tracing,
-including how long each measurement took.
+DEBUGGING
+---------
+Tracing goes to stderr and can be switched on two ways:
+
+  * NAUTILUS_TOTAL_SIZE_DEBUG=1 in nautilus' environment -- but note this is
+    easy to lose: nautilus is D-Bus activated, so `NAUTILUS_TOTAL_SIZE_DEBUG=1
+    nautilus` often just hands your request to a nautilus that is already
+    running with a different environment, and the variable never arrives.
+  * creating the marker file ~/.config/nautilus-total-size-debug (its contents
+    are irrelevant; only its existence is checked, and only at import).  This
+    survives however nautilus happens to get started, which makes it the
+    reliable option.
+
+Either way the output lands in the session journal, so with the marker file in
+place just run:
+
+    journalctl --user -f | grep total-size
 
 Install:  ~/.local/share/nautilus-python/extensions/total_size_column.py
 Requires: nautilus-python (python3-nautilus) for libnautilus-extension 4.0.
@@ -113,7 +147,7 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -122,14 +156,19 @@ ATTRIBUTE = "total_size"
 COLUMN_LABEL = "Total Size"
 PENDING_TEXT = "Calculating..."
 
-WORKER_COUNT = 4       # background threads driving the measurement
-CACHE_LIMIT = 4096     # max remembered (path, mtime) -> text entries
+WORKER_COUNT = 4          # background threads driving the measurement
+CACHE_LIMIT = 4096        # max remembered (path, mtime) -> text entries
+REFRESH_ATTEMPTS = 4      # how many times to nudge Nautilus to re-read a value
+REFRESH_INTERVAL_MS = 750
 
-_DEBUG = bool(os.environ.get("NAUTILUS_TOTAL_SIZE_DEBUG"))
+_DEBUG_MARKER = os.path.join(
+    os.path.expanduser("~"), ".config", "nautilus-total-size-debug")
 
-# Present on libnautilus-extension 4.0; guarded so a build without it falls
-# back to the invalidate path rather than failing to load at all.
-_HAS_ASYNC = hasattr(Nautilus, "info_provider_update_complete_invoke")
+# The marker file is checked because the environment variable is unreliable:
+# nautilus is D-Bus activated, so the variable frequently never reaches the
+# process that actually loads this extension.  os.path.exists() is a read.
+_DEBUG = bool(os.environ.get("NAUTILUS_TOTAL_SIZE_DEBUG")) or \
+    os.path.exists(_DEBUG_MARKER)
 
 
 def _log(message):
@@ -213,35 +252,6 @@ def directory_size(path, cancellable=None):
 
 # --- the extension ----------------------------------------------------------
 
-class _Waiter(object):
-    """One outstanding request for a folder's size.
-
-    `handle`/`closure`/`provider` are set for async requests and completed
-    exactly once.  Legacy (non-async) requests carry only `file_info` and are
-    refreshed with invalidate_extension_info() instead.
-    """
-
-    __slots__ = ("file_info", "provider", "handle", "closure", "is_async")
-
-    def __init__(self, file_info, provider=None, handle=None, closure=None):
-        self.file_info = file_info
-        self.provider = provider
-        self.handle = handle
-        self.closure = closure
-        self.is_async = handle is not None
-
-
-class _Job(object):
-    """A folder being measured, plus everyone waiting on the answer."""
-
-    __slots__ = ("key", "waiters", "cancellable")
-
-    def __init__(self, key):
-        self.key = key
-        self.waiters = []
-        self.cancellable = Gio.Cancellable()
-
-
 class TotalSizeColumn(GObject.GObject,
                       Nautilus.ColumnProvider,
                       Nautilus.InfoProvider):
@@ -252,7 +262,8 @@ class TotalSizeColumn(GObject.GObject,
         # Everything below is touched only from the GTK main thread except
         # _work_queue, which is the thread-safe handoff to the workers.
         self._cache = OrderedDict()   # (path, mtime_ns) -> formatted string
-        self._jobs = {}               # (path, mtime_ns) -> _Job
+        self._jobs = {}               # (path, mtime_ns) -> [FileInfo, ...]
+        self._awaiting_reread = set()  # keys nudged but not yet re-asked for
         self._work_queue = queue.SimpleQueue()
         self._workers = []
 
@@ -275,69 +286,31 @@ class TotalSizeColumn(GObject.GObject,
     # -- Nautilus.InfoProvider ----------------------------------------------
 
     def update_file_info_full(self, provider, handle, closure, file_info):
-        """Async entry point used by libnautilus-extension 4.0."""
+        """Entry point used by libnautilus-extension 4.0.
+
+        Always COMPLETE, never IN_PROGRESS -- see the header for why.
+        """
+        self._fill_in(file_info)
+        return Nautilus.OperationResult.COMPLETE
+
+    def update_file_info(self, file_info):
+        """Legacy one-argument entry point.  Identical behaviour."""
+        self._fill_in(file_info)
+
+    def cancel_update(self, provider, handle):
+        """Nothing to cancel: this provider never reports IN_PROGRESS."""
+
+    def _fill_in(self, file_info):
         try:
             text, key = self._resolve(file_info)
         except Exception as exc:                      # never break the view
-            _log("update failed: %r" % (exc,))
-            file_info.add_string_attribute(ATTRIBUTE, "")
-            return Nautilus.OperationResult.COMPLETE
-
-        file_info.add_string_attribute(ATTRIBUTE, text)
-
-        if key is None:                               # answer already known
-            return Nautilus.OperationResult.COMPLETE
-
-        if not _HAS_ASYNC:                            # very old binding
-            self._add_waiter(key, _Waiter(file_info))
-            return Nautilus.OperationResult.COMPLETE
-
-        self._add_waiter(key, _Waiter(file_info, provider, handle, closure))
-        return Nautilus.OperationResult.IN_PROGRESS
-
-    def update_file_info(self, file_info):
-        """Legacy entry point: no handle, so refresh via invalidation."""
-        try:
-            text, key = self._resolve(file_info)
-        except Exception as exc:
             _log("update failed: %r" % (exc,))
             file_info.add_string_attribute(ATTRIBUTE, "")
             return
 
         file_info.add_string_attribute(ATTRIBUTE, text)
         if key is not None:
-            self._add_waiter(key, _Waiter(file_info))
-
-    def cancel_update(self, provider, handle):
-        """Nautilus no longer wants this value; drop the handle unused.
-
-        After this returns, `handle` may be freed by Nautilus, so it must
-        never be passed to update_complete_invoke().  Dropping the waiter here
-        is what makes that guarantee.  If nobody is left waiting we also
-        cancel the measurement itself, so abandoning a huge folder stops the
-        work instead of tying up a worker.
-        """
-        for key, job in list(self._jobs.items()):
-            remaining = [w for w in job.waiters
-                         if not self._same_handle(w, handle)]
-            if len(remaining) == len(job.waiters):
-                continue
-
-            job.waiters = remaining
-            if not remaining:
-                del self._jobs[key]
-                job.cancellable.cancel()
-                _log("cancelled measurement of %s (no waiters left)" % key[0])
-            return
-
-    @staticmethod
-    def _same_handle(waiter, handle):
-        if not waiter.is_async:
-            return False
-        try:
-            return waiter.handle == handle
-        except Exception:
-            return waiter.handle is handle
+            self._enqueue(key, file_info)
 
     # -- value resolution ----------------------------------------------------
 
@@ -370,24 +343,26 @@ class TotalSizeColumn(GObject.GObject,
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
+            # Nautilus came back for this value, so the nudging worked and
+            # any pending retry can stop.
+            self._awaiting_reread.discard(key)
             return cached, None
 
         return PENDING_TEXT, key
 
     # -- background work -----------------------------------------------------
 
-    def _add_waiter(self, key, waiter):
-        """Attach `waiter` to the job for `key`, starting it if needed."""
-        job = self._jobs.get(key)
-        if job is not None:
-            job.waiters.append(waiter)       # already being measured
+    def _enqueue(self, key, file_info):
+        """Queue a measurement for `key`, or join one already running."""
+        waiters = self._jobs.get(key)
+        if waiters is not None:
+            if file_info not in waiters:
+                waiters.append(file_info)    # already being measured
             return
 
-        job = _Job(key)
-        job.waiters.append(waiter)
-        self._jobs[key] = job
+        self._jobs[key] = [file_info]
         self._start_workers()
-        self._work_queue.put(job)
+        self._work_queue.put(key)
         _log("queued %s" % (key[0],))
 
     def _start_workers(self):
@@ -409,15 +384,12 @@ class TotalSizeColumn(GObject.GObject,
         GLib.idle_add(), which is documented as thread-safe.
         """
         while True:
-            job = self._work_queue.get()
-            path = job.key[0]
+            key = self._work_queue.get()
+            path = key[0]
             started = time.monotonic()
             try:
-                text = format_size(directory_size(path, job.cancellable))
+                text = format_size(directory_size(path))
             except GLib.Error as error:
-                if job.cancellable.is_cancelled():
-                    _log("abandoned %s" % path)
-                    continue                 # nobody wants it; don't cache
                 _log("measure of %s failed: %s" % (path, error.message))
                 text = ""
             except Exception as exc:
@@ -428,32 +400,53 @@ class TotalSizeColumn(GObject.GObject,
                  % (path, time.monotonic() - started, text))
             # PRIORITY_DEFAULT, not PRIORITY_DEFAULT_IDLE: a busy Nautilus
             # main loop will starve idle-priority callbacks indefinitely.
-            GLib.idle_add(self._on_result, job.key, text,
+            GLib.idle_add(self._on_result, key, text,
                           priority=GLib.PRIORITY_DEFAULT)
 
     def _on_result(self, key, text):
-        """Main thread: cache the answer and release everyone waiting on it."""
+        """Main thread: cache the answer, then get Nautilus to re-read it."""
         self._cache[key] = text
         self._cache.move_to_end(key)
         while len(self._cache) > CACHE_LIMIT:
             self._cache.popitem(last=False)
 
-        job = self._jobs.pop(key, None)
-        for waiter in (job.waiters if job else ()):
-            try:
-                waiter.file_info.add_string_attribute(ATTRIBUTE, text)
-                if waiter.is_async:
-                    Nautilus.info_provider_update_complete_invoke(
-                        waiter.closure,
-                        waiter.provider,
-                        waiter.handle,
-                        Nautilus.OperationResult.COMPLETE,
-                    )
-                else:
-                    waiter.file_info.invalidate_extension_info()
-            except Exception as exc:
-                _log("completing %s failed: %r" % (key[0], exc))
+        file_infos = self._jobs.pop(key, [])
+        for file_info in file_infos:
+            file_info.add_string_attribute(ATTRIBUTE, text)
 
+        if file_infos:
+            self._awaiting_reread.add(key)
+            self._nudge(key, file_infos, 1)
+
+        return GLib.SOURCE_REMOVE
+
+    def _nudge(self, key, file_infos, attempt):
+        """Ask Nautilus to re-read the value, retrying a bounded few times.
+
+        invalidate_extension_info() makes Nautilus call us again, and that
+        call hits the cache and renders the real size.  A single invalidate
+        proved unreliable in earlier versions, so retry -- but stop the moment
+        Nautilus actually asks (see _resolve, which discards the key), and
+        give up after REFRESH_ATTEMPTS regardless.  Both exits are needed:
+        the first keeps this quiet in the normal case, the second stops a
+        folder scrolled out of view from retrying forever.
+        """
+        if key not in self._awaiting_reread:
+            return GLib.SOURCE_REMOVE           # Nautilus already came back
+
+        for file_info in file_infos:
+            try:
+                file_info.invalidate_extension_info()
+            except Exception as exc:
+                _log("invalidate for %s failed: %r" % (key[0], exc))
+
+        if attempt >= REFRESH_ATTEMPTS:
+            self._awaiting_reread.discard(key)
+            _log("gave up nudging %s after %d attempts" % (key[0], attempt))
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add(REFRESH_INTERVAL_MS,
+                         self._nudge, key, file_infos, attempt + 1)
         return GLib.SOURCE_REMOVE
 
 

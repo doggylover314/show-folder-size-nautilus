@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-05
+
+### Fixed
+- **Folders stuck on `Calculating...` forever.** The async `InfoProvider`
+  protocol (`IN_PROGRESS` + `info_provider_update_complete_invoke()`) never
+  delivered its completion here: a 100 GB folder measured in well under a
+  second and the cell still never updated. Worse, an `IN_PROGRESS` that never
+  completes is unrecoverable — Nautilus waits on a promise nothing will keep,
+  with no timeout.
+
+  Every update now returns `COMPLETE` immediately, with the real size if
+  known and the placeholder otherwise, and the finished measurement calls
+  `invalidate_extension_info()` to make Nautilus re-read it. Returning
+  `COMPLETE` cannot wedge anything; the worst case is a stale cell that the
+  next refresh fixes.
+
+### Added
+- The re-read nudge is retried up to 4 times at 750 ms. It stops the instant
+  Nautilus asks again, and gives up regardless after the cap — a single
+  invalidate proved unreliable in 0.1.x, but a folder that silently never
+  updates is worse than one redundant refresh.
+- Debug tracing can be enabled with the marker file
+  `~/.config/nautilus-total-size-debug`. `NAUTILUS_TOTAL_SIZE_DEBUG=1` is
+  unreliable because nautilus is D-Bus activated, so the variable often never
+  reaches the process that loads the extension. Output goes to the journal:
+  `journalctl --user -f | grep total-size`.
+
+### Removed
+- Operation-handle tracking, `cancel_update()` bookkeeping and the
+  measurement `Cancellable`. With nothing ever reporting `IN_PROGRESS` there
+  is no operation for Nautilus to cancel, so all of it was dead weight.
+
 ## [Unreleased]
 
 ### Planned
@@ -76,6 +108,7 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/doggylover314/nautilus-total-size/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.1
 [0.2.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.2.0
 [0.1.0]: https://github.com/doggylover314/nautilus-total-size/releases/tag/v0.1.0

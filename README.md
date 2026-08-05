@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached in memory, so browsing
 never blocks. While a folder is being measured the column reads
 `Calculating...`.
 
-> **Status: early / v0.2.0.** Measurement now uses the same GIO call as
+> **Status: early / v0.2.1.** Measurement now uses the same GIO call as
 > Nautilus' Properties window, and sizes are formatted exactly like the
 > built-in Size column. See [Known issues](#known-issues) before installing.
 
@@ -50,6 +50,10 @@ Full instructions, distro package names and troubleshooting:
   `os.stat(follow_symlinks=False)` as a fallback.
 - Measurements run on a small fixed thread pool (4 workers), never on the GTK
   main thread. Results cross back via `GLib.idle_add()` at `PRIORITY_DEFAULT`.
+- Updates always return `COMPLETE`, never `IN_PROGRESS`; the finished
+  measurement calls `invalidate_extension_info()` to make Nautilus re-read the
+  cached value. See the header comment for why the async handle protocol isn't
+  used.
 - Sizes are formatted with `GLib.format_size()`, so they match the built-in
   Size column and follow your locale (base-10: 1 GiB reads as `1.1 GB`).
 - Regular files are left blank — Nautilus' Size column already covers them.
@@ -68,7 +72,7 @@ Full instructions, distro package names and troubleshooting:
 
 ## Is it safe? (read-only guarantee)
 
-As of **v0.2.0** this extension only ever *reads* the filesystem. Sizes come
+As of **v0.2.1** this extension only ever *reads* the filesystem. Sizes come
 from `Gio.File.measure_disk_usage()` (the same call Nautilus' Properties
 window uses), falling back to `os.walk` / `os.stat` / `os.lstat`. There is:
 
@@ -125,15 +129,23 @@ include your `nautilus --version` and any stderr output.
 
 ## Debugging
 
-Run Nautilus from a terminal with tracing on:
+Create the marker file and watch the journal:
 
 ```bash
+touch ~/.config/nautilus-total-size-debug
 nautilus -q
-NAUTILUS_TOTAL_SIZE_DEBUG=1 nautilus
+journalctl --user -f | grep total-size
 ```
 
-Each queued folder and each completed walk logs to stderr, as does any Python
-import error.
+Each queued folder, each completed measurement (with timing) and any Python
+import error is logged.
+
+The `NAUTILUS_TOTAL_SIZE_DEBUG=1` environment variable also works, but it's
+unreliable in practice: nautilus is D-Bus activated, so
+`NAUTILUS_TOTAL_SIZE_DEBUG=1 nautilus` usually just hands your request to a
+nautilus that is already running with a different environment, and the
+variable never arrives. The marker file survives however nautilus is started.
+Delete it when you're done.
 
 ## Roadmap
 
