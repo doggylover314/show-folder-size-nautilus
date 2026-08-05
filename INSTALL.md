@@ -20,7 +20,7 @@ ls /usr/lib/*/nautilus/extensions-4/libnautilus-python.so
 
 If that path doesn't exist but the package is installed, your Nautilus is
 older than 4.0 and this extension will not load (see
-[Version compatibility](#4-version-compatibility)).
+[Version compatibility](#6-version-compatibility)).
 
 ## 2. Install the extension
 
@@ -80,7 +80,23 @@ The column is registered but hidden until you turn it on:
 Folders will briefly show `Calculating...` while the background walk runs,
 then switch to a size.
 
-## 5. Version compatibility
+## 5. Choose where the cache lives (optional)
+
+Since v0.3.0 measured sizes are cached on disk so they survive a restart. The
+default is `~/.cache/nautilus-total-size/`. To change it, or to turn writing
+off entirely:
+
+```ini
+# ~/.config/nautilus-total-size.conf
+cache_dir=/some/other/path
+# or, to disable on-disk caching completely:
+cache_dir=
+```
+
+The `.deb` asks this at install time and records the system-wide default in
+`/etc/nautilus-total-size.conf`; the per-user file above overrides it.
+
+## 6. Version compatibility
 
 This extension targets **libnautilus-extension 4.0**, which is what GNOME 46
 ships. Check yours:
@@ -100,15 +116,18 @@ nautilus --version
 
 ### The column doesn't appear in the Visible Columns list
 
-The extension didn't load. Run Nautilus from a terminal to see why:
+The extension didn't load. Turn on tracing and watch the journal:
 
 ```bash
+touch ~/.config/nautilus-total-size-debug
 nautilus -q
-NAUTILUS_TOTAL_SIZE_DEBUG=1 nautilus
+journalctl --user -f
 ```
 
 Python syntax errors, a missing `nautilus-python`, or a wrong
-`gi.require_version` all surface here as a traceback.
+`gi.require_version` all surface there as a traceback. Don't pipe through
+`grep total-size` — tracebacks don't contain that string, so it hides exactly
+what you're looking for. Delete the marker file when you're done.
 
 Also confirm the file is in the right place and readable:
 
@@ -118,12 +137,10 @@ ls -l ~/.local/share/nautilus-python/extensions/total_size_column.py
 
 ### Everything says `Calculating...` and never finishes
 
-This is a known bug in v0.1.0 — see
-[Known issues](README.md#known-issues) in the README. It is being worked on.
-
-Genuinely large trees do legitimately take a while on first view; the debug
-output above will tell you which case you're in (a completed walk logs a
-result line).
+Fixed in v0.2.2 — upgrade if you're on anything older. If you see it on a
+current version, turn on tracing as above: a completed measurement logs a
+`measured <path> in <n>s` line, so you can tell "still working" from "the
+result never arrived", and that distinction is what to report in an issue.
 
 ### Sizes look wrong compared to `du`
 
