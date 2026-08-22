@@ -87,6 +87,14 @@ different ways this project measures a folder finally agree on the answer.
   default and it says so before writing, because it outranks the location set
   in the window.
 
+### Added
+- **A `tests/` directory**, because the ABI support claim above is otherwise
+  untestable: any one machine has exactly one of the three ABIs installed.
+  `tests/fetch-abi-fixtures.sh` downloads and extracts (never installs) the
+  real libraries from Nautilus 42.6 and 50.2.2, and `tests/run-tests.sh` runs
+  everything, skipping rather than failing when the fixtures are absent so a
+  clean clone with no network still passes.
+
 ### Fixed
 - **The extension loaded on exactly one Nautilus ABI, and silently did nothing
   on the rest.** `gi.require_version("Nautilus", "4.0")` was a hard pin, so on

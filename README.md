@@ -421,6 +421,13 @@ provider registers without error" is a weaker claim than "it works", and the
 table says so. If you are on one of those releases, a report either way is
 genuinely useful — please include `nautilus --version` and any stderr.
 
+Both checks are in [`tests/`](tests/) and you can re-run them yourself:
+
+```bash
+tests/fetch-abi-fixtures.sh   # once; downloads and extracts, installs nothing
+tests/run-tests.sh
+```
+
 Roughly, Nautilus 42 is GNOME 42 (Ubuntu 22.04 LTS), 46 is GNOME 46
 (Ubuntu 24.04 LTS), and 3.36 is GNOME 3.36 (Ubuntu 20.04 LTS); the Nautilus
 number has tracked the GNOME number since GNOME 40. The distribution mapping
