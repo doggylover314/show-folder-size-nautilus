@@ -109,12 +109,13 @@ chmod 0644 "${BUILD}/usr/share/doc/${PKG}/changelog.gz"
 
 # The GTK4 and libadwaita typelibs moved from Depends to Recommends, and the
 # nautilus (>= 43) floor is gone. Only the setup window needs GTK4; the
-# extension and the indexer do not, and the extension now asks for the 3.0
-# extension ABI when 4.0 is absent (structurally -- that path is UNVERIFIED,
-# see the note in show_folder_size.py). A hard dependency on either meant the
-# refused to install on a desktop where the column would have worked, which is
-# the opposite of the intent. show-folder-size-setup exits with a message
-# naming the missing packages rather than a typelib traceback.
+# extension and the indexer do not, and the extension picks whichever
+# libnautilus-extension ABI is installed (3.0, 4.0 and 4.1 all work -- see the
+# ABI block in show_folder_size.py). A hard dependency on either typelib, or a
+# version floor, meant the package refused to install on desktops where the
+# column would have worked fine, which is the opposite of the intent.
+# show-folder-size-setup exits with a message naming the missing packages
+# rather than a typelib traceback.
 #
 # Conflicts/Replaces/Provides on nautilus-total-size, the name this package
 # used up to 0.4.0. The rename in 0.5.0 also renamed every file it ships

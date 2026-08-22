@@ -88,6 +88,34 @@ different ways this project measures a folder finally agree on the answer.
   in the window.
 
 ### Fixed
+- **The extension loaded on exactly one Nautilus ABI, and silently did nothing
+  on the rest.** `gi.require_version("Nautilus", "4.0")` was a hard pin, so on
+  any other ABI the import raised before the provider registered: no column, no
+  visible error, nothing in the UI to suggest the package was even installed.
+  There are three ABIs in the field — 3.0 for Nautilus up to 42, 4.0 for 43–48,
+  and 4.1 for 49–50 — so the pin was wrong on two of the three, including the
+  newest.
+
+  The replacement asks GObject-Introspection which ABIs are actually installed
+  and takes the newest, rather than consulting a hardcoded list. A list would
+  have needed an edit for 4.1, which is precisely the failure being fixed;
+  discovery means a future 4.2 or 5.0 works untouched.
+
+  Where both a 3.0 and a 4.x typelib are installed — a leftover
+  `gir1.2-nautilus-3.0` after a distribution upgrade, or a development machine
+  — "newest" is the wrong answer, because loading the ABI the host is not using
+  registers our types against the wrong shared library and the provider is
+  never recognised. Nautilus has already opened its own copy by the time an
+  extension is imported, so `/proc/self/maps` settles it: `.so.1` means 3.0,
+  `.so.4` means 4.x. That reorders the candidates rather than filtering them,
+  so an odd system can still fall back instead of failing outright.
+
+  Verified against the `.gir` shipped by Nautilus 3.36, 42.6, 46.0, 48.0, 49.0
+  and 50.2.2: every symbol used here exists with identical signatures in all
+  six, which is what makes "newest wins" safe and why no version-conditional
+  code was needed. Selection itself is covered by tests for each ABI alone,
+  both present, neither present, a future 4.2, and `10.0` versus `9.0` — that
+  last one because comparing versions as text ranks 9 above 10.
 - **Installing over the old package name left both installed.** The 0.5.0
   rename also renamed every file shipped, so dpkg saw two unrelated packages
   with no overlapping paths, installed both, and nautilus loaded two

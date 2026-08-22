@@ -221,37 +221,116 @@ from collections import OrderedDict
 
 import gi
 
-# Extension ABI versions to try, newest first.  Nautilus 43 moved to GTK4 and
-# bumped libnautilus-extension from 3.0 to 4.0; 42 and everything before it is
-# 3.0.  Pinning "4.0" the way this file used to means the extension does not
-# load at all on a 3.0 desktop -- not a degraded column, no column, and no
-# error anyone sees without turning on tracing first.
+# --- picking the libnautilus-extension ABI ----------------------------------
 #
-# Asking for the newest one present rather than a fixed string also means a
-# future ABI 5.0 needs one entry added here rather than a code change, and
-# until then a 5.0-only desktop fails the same way 3.0 used to.
-# UNVERIFIED: the 3.0 entry is written from the API this file already uses
-# being present in both ABIs, and has NOT been run against a real 3.0 desktop.
-# No 3.0 typelib was obtainable on the machine this was developed on. Treat
-# "works on Nautilus 42 and earlier" as untested until someone has actually
-# seen the column appear there, and say so in the README rather than claiming
-# support this file cannot demonstrate.
-NAUTILUS_ABI_VERSIONS = ("4.0", "3.0")
+# This file used to pin "4.0", which meant it did not load AT ALL on any other
+# ABI -- not a degraded column, no column, and no error anyone sees without
+# turning tracing on first.  There are three ABIs in the wild, and a fixed
+# string is wrong on two of them:
+#
+#     Nautilus 3.x - 42   ABI 3.0   libnautilus-extension.so.1
+#     Nautilus 43 - 48    ABI 4.0   libnautilus-extension.so.4
+#     Nautilus 49 - 50    ABI 4.1   libnautilus-extension.so.4
+#
+# So the list is not hardcoded: ask gi which ones are actually installed and
+# take the newest.  A future 4.2 or 5.0 then works with no edit here, which a
+# list would not -- the 4.1 bump is exactly the case a "4.0, 3.0" list missed.
+#
+# Verified across the .gir shipped by Nautilus 3.36, 42.6, 46.0, 48.0, 49.0
+# and 50.2.2: every symbol this file uses (ColumnProvider.get_columns,
+# InfoProvider.update_file_info/cancel_update, Column and its name/attribute/
+# label/description/xalign properties, OperationResult.COMPLETE, and FileInfo
+# add_string_attribute/get_uri_scheme/get_location/invalidate_extension_info)
+# is present and unchanged in all six.  That is what makes "newest wins" safe:
+# there is no version-conditional code below, because there is no difference
+# to condition on.
+#
+# Then executed, not just read: the whole registration path -- this Column
+# constructor call, the xalign property, subclassing both interfaces,
+# instantiating the provider, calling get_columns() -- was run against the
+# real so.1 from Nautilus 42.6 and the real so.4 from 50.2.2, and passed on
+# both.  What that still does NOT cover is a running file manager, so the
+# README claims "registers cleanly" for 3.0 and 4.1 rather than "works".
+NAUTILUS_ABI_FALLBACK = ("4.1", "4.0", "3.0")
 
-NAUTILUS_ABI = None
-for _candidate in NAUTILUS_ABI_VERSIONS:
+# ABI 3.0 and 4.x are different shared libraries, and loading the wrong one
+# inside a running file manager registers our GObject types against a library
+# nautilus is not using -- the provider is simply never recognised.  When both
+# typelibs are installed (a leftover gir1.2-nautilus-3.0 after an upgrade, or
+# a dev box), "newest" would be the wrong answer.  nautilus has already loaded
+# its own copy by the time an extension is imported, so /proc/self/maps says
+# authoritatively which one is correct.  4.0 and 4.1 share so.4 and cannot be
+# told apart this way, but they never coexist: same file, same package.
+_ABI_SONAME = {"3.0": "libnautilus-extension.so.1"}
+_DEFAULT_SONAME = "libnautilus-extension.so.4"
+
+
+def _abi_sort_key(version):
+    """Key for a reverse sort: newest first, anything unparseable last.
+
+    Tuples of ints, not strings: "10.0" has to beat "9.0", and it does not
+    if you compare them as text.  The leading 1/0 is what keeps a version
+    that does not parse at the bottom AFTER the reverse, which is why the
+    sort is reverse=True rather than sort-then-reverse -- reversing a list
+    ordered by an ascending key flips that marker too, and puts the garbage
+    entry first.
+    """
     try:
-        gi.require_version("Nautilus", _candidate)
+        return (1, tuple(int(part) for part in version.split(".")))
     except ValueError:
-        continue
-    NAUTILUS_ABI = _candidate
-    break
+        return (0, ())
+
+
+def _loaded_soname():
+    """Which libnautilus-extension the host process already has open."""
+    try:
+        with open("/proc/self/maps", "r") as handle:
+            maps = handle.read()
+    except OSError:
+        return None                       # not Linux, or /proc not mounted
+    for soname in set(_ABI_SONAME.values()) | {_DEFAULT_SONAME}:
+        if soname in maps:
+            return soname
+    return None                           # not nautilus: the indexer, a test
+
+
+def _pick_nautilus_abi():
+    try:
+        from gi import Repository
+        found = list(Repository.get_default().enumerate_versions("Nautilus"))
+    except Exception:                     # very old pygobject, or no gi at all
+        found = []
+    for version in NAUTILUS_ABI_FALLBACK:
+        if version not in found:
+            found.append(version)         # try it anyway; require_version rules
+    found.sort(key=_abi_sort_key, reverse=True)
+
+    loaded = _loaded_soname()
+    if loaded is not None:
+        # Reorder, do not filter.  The candidates include guesses from the
+        # fallback list that may not be installed, so a filter can leave a
+        # list whose only entry does not load -- and then we would raise
+        # ImportError on a machine that had a perfectly good typelib.
+        # Preferring the ones matching the loaded library gets the same
+        # answer whenever it matters and degrades to "newest" when it does not.
+        found.sort(key=lambda v:
+                   _ABI_SONAME.get(v, _DEFAULT_SONAME) != loaded)
+
+    for version in found:
+        try:
+            gi.require_version("Nautilus", version)
+        except ValueError:
+            continue
+        return version
+    return None
+
+
+NAUTILUS_ABI = _pick_nautilus_abi()
 
 if NAUTILUS_ABI is None:
     raise ImportError(
-        "no libnautilus-extension typelib found. Tried: %s. Install "
-        "nautilus-python (python3-nautilus on Debian/Ubuntu)."
-        % ", ".join(NAUTILUS_ABI_VERSIONS))
+        "no libnautilus-extension typelib found. Install nautilus-python "
+        "(python3-nautilus on Debian/Ubuntu).")
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 

@@ -389,16 +389,46 @@ total stays cached until its own mtime changes. `Ctrl+R` forces a recount.
 
 ## GNOME version support
 
-| GNOME | Nautilus | Extension API | Status |
-|---|---|---|---|
-| 46 | 46.x | 4.0 | **Tested** — developed against 46.4 |
-| 47+ | 47.x+ | not yet confirmed | **Unverified** — untested, see below |
+There are three libnautilus-extension ABIs in the wild. The extension asks
+GObject-Introspection which ones are installed and uses the newest, so it is
+not pinned to any of them:
 
-Support for newer GNOME releases is planned but not yet done. Nothing here has
-been tested past Nautilus 46.4, and the required
-`gi.require_version("Nautilus", "4.0")` may need to change if a later release
-bumps the extension ABI. Reports from newer desktops are welcome — please
-include your `nautilus --version` and any stderr output.
+| Nautilus | Extension ABI | Shared library | Status |
+|---|---|---|---|
+| 3.x – 42 | 3.0 | `libnautilus-extension.so.1` | Registration tested, desktop untested |
+| 43 – 48 | 4.0 | `libnautilus-extension.so.4` | **Fully tested** — developed against 46.4 |
+| 49 – 50 | 4.1 | `libnautilus-extension.so.4` | Registration tested, desktop untested |
+
+**What was actually verified, precisely.** Two things, and it is worth keeping
+them apart:
+
+1. Every Nautilus symbol this extension uses was checked against the `.gir`
+   shipped by the Nautilus builds themselves for 3.36, 42.6, 46.0, 48.0, 49.0
+   and 50.2.2. All are present with identical signatures in all six. That is
+   why there is no version-conditional code: there is no difference to
+   condition on.
+2. The registration path was then *executed* against the real
+   `libnautilus-extension.so.1` and `.so.4` from Nautilus 42.6 and 50.2.2 —
+   building the column with the same arguments, setting the same property,
+   subclassing the same two interfaces, instantiating the provider, and
+   calling `get_columns()`. Everything passed on both.
+
+**What it does not mean.** Neither of those is a running file manager. Only
+Nautilus 46.4 has been used as a desktop, so nobody has yet *watched the
+column appear* on a 3.0 or 4.1 machine. Measurement, caching and delivery are
+version-independent code and are exercised on every run here, but "the
+provider registers without error" is a weaker claim than "it works", and the
+table says so. If you are on one of those releases, a report either way is
+genuinely useful — please include `nautilus --version` and any stderr.
+
+Roughly, Nautilus 42 is GNOME 42 (Ubuntu 22.04 LTS), 46 is GNOME 46
+(Ubuntu 24.04 LTS), and 3.36 is GNOME 3.36 (Ubuntu 20.04 LTS); the Nautilus
+number has tracked the GNOME number since GNOME 40. The distribution mapping
+is offered as a rough guide — the ABI column is the part that was verified.
+
+A future 4.2 or 5.0 needs no change here: it is picked up automatically if its
+API is compatible. If it is not, the extension declines to load rather than
+half-working, and the reason lands in the journal.
 
 ## Debugging
 
