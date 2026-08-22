@@ -16,18 +16,26 @@ index.  Or:
     show-folder-size-index --all               # index every local drive, no prompt
     show-folder-size-index ~/Videos /mnt/data  # index specific paths
     show-folder-size-index --all --dry-run     # measure, report, write nothing
+    show-folder-size-index --all --refresh     # only re-measure changed folders
+    show-folder-size-index --autostart         # what the login entry runs
 
 SAFETY / AUDIT NOTES
 --------------------
-  * Reads with os.walk() and os.lstat().  Writes exactly one file: the same
-    size cache the extension uses (~/.cache/show-folder-size-nautilus/sizes.json by
-    default), written atomically by the extension's own save function.
-    --dry-run writes nothing at all.
+  * Reads with os.scandir() and os.lstat().  Writes exactly one file: the same
+    size cache the extension uses (~/.cache/show-folder-size-nautilus/sizes.json
+    by default), written atomically by the extension's own save function, plus
+    a zero-length lock file beside it (see --autostart).  --dry-run writes
+    nothing at all.
   * No network, no subprocesses, nothing removed or modified on disk.
   * Symlinks are never followed, so there are no loops and no tree is counted
-    twice.  Hard-linked files are counted once per run.
-  * By default it does not cross mount points -- indexing / will not wander
-    into an external drive.  Pass --cross-mounts to allow it.
+    twice.  Each link does contribute its own size (the length of the path it
+    points at), and hard-linked files are counted once per link.  Both match
+    Gio.File.measure_disk_usage() and therefore the Properties window; both
+    were measured rather than assumed, and both are changes from earlier
+    versions, which disagreed with the extension about the same folder.
+  * By default it does not cross mount points: indexing / stops at the edge of
+    the root filesystem and never descends into an external drive, /proc,
+    /sys or /run.  Pass --cross-mounts to allow it.
 
 WHY ONE BOTTOM-UP PASS
 ----------------------
@@ -36,9 +44,24 @@ quadratic: every level re-reads everything below it, so a tree ten deep is
 read ten times.  Instead this walks bottom-up once, and each directory's total
 is its own files plus the totals of its children, which are already known.
 Every directory in the tree gets a size for the cost of reading the tree once.
+
+WHY NOT os.walk
+---------------
+Because os.walk cannot prune a bottom-up traversal.  Pruning works by editing
+`dirnames` in place, and that is documented to have no effect when
+topdown=False -- which is the mode a bottom-up pass needs.  So the old version
+walked into every mounted filesystem it met, spent the time reading them, and
+then discarded the results as "not on this device".  Indexing / meant walking
+every external drive, plus /proc and /sys, to throw all of it away.
+
+Collecting a topdown=True walk into a list and reversing it would fix the
+pruning and replace it with a worse problem: that list holds every filename on
+the drive at once.  The explicit stack below keeps only one frame per level of
+depth, the same as os.walk, and can prune before it descends.
 """
 
 import argparse
+import fcntl
 import os
 import stat
 import sys
@@ -53,8 +76,14 @@ _SEARCH_PATHS = [
     "/usr/share/nautilus-python/extensions",
 ]
 
-_extension = None
-for _candidate in _SEARCH_PATHS:
+# If something already imported the extension -- show-folder-size-setup does,
+# so that changing the cache location in its window applies to the indexing it
+# then starts -- reuse that exact module object. Re-resolving it by path would
+# give a second copy with its own CACHE_PATH, and the two would disagree about
+# where to write.
+_extension = sys.modules.get("show_folder_size")
+
+for _candidate in [] if _extension is not None else _SEARCH_PATHS:
     if os.path.exists(os.path.join(_candidate, "show_folder_size.py")):
         sys.path.insert(0, _candidate)
         try:
@@ -79,6 +108,43 @@ REAL_FILESYSTEMS = {
     "vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "zfs", "bcachefs",
 }
 
+# How long the login entry waits before it starts reading disks.  A login is
+# already the busiest minute a desktop has -- shell, extensions, browser
+# session restore, sync clients -- and being the process that makes all of
+# that feel slow is a good way to get uninstalled.
+AUTOSTART_DELAY_S = 30
+
+# How much nicer than everything else the autostart run makes itself.  This is
+# CPU priority only; there is no portable ionice without a subprocess or a raw
+# syscall, and neither is worth it here.
+AUTOSTART_NICENESS = 10
+
+# The kernel escapes exactly these four characters in /proc/self/mounts.
+_MOUNT_ESCAPES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
+
+
+def _unescape_mount(field):
+    """Undo the octal escaping the kernel applies to mount point names.
+
+    NOT `field.encode().decode("unicode_escape")`, which the old version used.
+    That round-trips through latin-1, so it turns any non-ASCII mount point --
+    /media/you/Musique, /run/media/you/Backupµ -- into mojibake, and then
+    os.path.isdir() says no such directory and the drive silently vanishes
+    from the list.  Escaping is a property of the four bytes below, so decode
+    exactly those and leave every other character alone.
+    """
+    out = []
+    position = 0
+    while position < len(field):
+        if field[position] == "\\" and \
+                field[position + 1:position + 4] in _MOUNT_ESCAPES:
+            out.append(_MOUNT_ESCAPES[field[position + 1:position + 4]])
+            position += 4
+        else:
+            out.append(field[position])
+            position += 1
+    return "".join(out)
+
 
 def list_drives():
     """Mounted local filesystems, as [(mountpoint, fstype, device)].
@@ -97,12 +163,11 @@ def list_drives():
                 device, mount_point, fs_type = fields[0], fields[1], fields[2]
                 if fs_type not in REAL_FILESYSTEMS:
                     continue
-                # /proc/mounts escapes spaces and friends as octal.
-                mount_point = mount_point.encode().decode("unicode_escape")
+                mount_point = _unescape_mount(mount_point)
                 if mount_point in seen or not os.path.isdir(mount_point):
                     continue
                 seen.add(mount_point)
-                drives.append((mount_point, fs_type, device))
+                drives.append((mount_point, fs_type, _unescape_mount(device)))
     except OSError as error:
         print("warning: could not read /proc/self/mounts (%s)" % error,
               file=sys.stderr)
@@ -111,63 +176,145 @@ def list_drives():
     return drives
 
 
-def index_tree(root, cross_mounts=False, on_progress=None):
+def _scan_dir(path):
+    """(real subdirectories, everything else) for `path`, stat-ing nothing.
+
+    scandir carries the kernel's d_type, so is_dir() answers straight from the
+    readdir result on every filesystem that reports it, at no syscall cost.
+
+    The split is "a real directory" against "everything else", which puts
+    symlinks -- including symlinks that point at directories -- in the second
+    list.  That is what makes link loops impossible (nothing in the second
+    list is ever descended into) while still counting each link's own size,
+    which is what GIO does and therefore what the Properties window shows.
+
+    An unreadable directory yields nothing rather than raising.  A drive with
+    one root-owned folder on it should still index the other nine.
+    """
+    subdirs, others = [], []
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.name)
+                    else:
+                        others.append(entry.name)
+                except OSError:
+                    continue          # vanished mid-scan; nothing to add
+    except OSError:
+        pass
+    return subdirs, others
+
+
+# Stack frame layout for the traversal below.  A list, not a namedtuple,
+# because the last three fields are mutated in place as children report back.
+_PATH, _MTIME, _SUBDIRS, _FILES, _NEXT, _TOTAL, _REUSABLE = range(7)
+
+
+def index_tree(root, cross_mounts=False, on_progress=None, known=None,
+               progress_every=2000):
     """Return {directory: (mtime_ns, bytes)} for every directory under `root`.
 
-    One bottom-up pass: a directory's total is its own regular files plus the
-    already-computed totals of its subdirectories.  Symlinks are skipped
-    entirely (never followed, never counted), and hard links are counted once
-    per run.
+    One bottom-up pass over an explicit stack: a directory's total is its own
+    regular files plus the already-computed totals of its subdirectories.
+
+    `known` turns on refresh mode.  Pass the existing cache and a directory
+    whose mtime is unchanged *and* whose every subdirectory was itself reused
+    keeps its cached total without stat-ing a single one of its files.  On a
+    tree that has barely changed this removes almost all of the syscalls,
+    because one lstat per file is what the work actually is.
+
+    The catch, stated plainly: this trusts directory mtime as the signal that
+    something changed, and mtime does not move when an existing file is
+    written to in place.  A 2 GB download growing inside an otherwise
+    untouched folder is invisible to a refresh.  That is the same assumption
+    the extension's own cache key already makes -- it is why the extension
+    watches directories with GFileMonitor as a backstop -- so refresh mode is
+    no less accurate than the cache it is filling.  It is still less accurate
+    than a full pass, which is why it is not the default for a manual run.
     """
-    sizes = {}
     results = {}
-    seen_hardlinks = set()
-    scanned = 0
 
     try:
-        root_device = os.lstat(root).st_dev
+        root_info = os.lstat(root)
     except OSError as error:
         print("  skipping %s: %s" % (root, error), file=sys.stderr)
         return results
 
-    for dirpath, dirnames, filenames in os.walk(root, topdown=False,
-                                                followlinks=False):
-        total = 0
+    root_device = root_info.st_dev
 
-        for name in filenames:
+    def new_frame(path, info):
+        subdirs, files = _scan_dir(path)
+        return [path, info.st_mtime_ns, subdirs, files, 0, 0, True]
+
+    stack = [new_frame(root, root_info)]
+    scanned = 0
+
+    while stack:
+        frame = stack[-1]
+        position = frame[_NEXT]
+
+        if position < len(frame[_SUBDIRS]):
+            frame[_NEXT] += 1
+            child = os.path.join(frame[_PATH], frame[_SUBDIRS][position])
+
             try:
-                info = os.lstat(os.path.join(dirpath, name))
+                child_info = os.lstat(child)
             except OSError:
+                # Cannot even look at it.  Its size is unknown rather than
+                # zero, so this directory must not be reused from the cache:
+                # a folder that became readable since the last run has to be
+                # noticed.
+                frame[_REUSABLE] = False
                 continue
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+
+            if not cross_mounts and child_info.st_dev != root_device:
+                # The prune that the whole rewrite is for.  Note this also
+                # stops at btrfs subvolumes and bind mounts, which report a
+                # different st_dev despite being the same disk; --cross-mounts
+                # is the answer for those.
+                frame[_REUSABLE] = False
                 continue
-            if info.st_nlink > 1:
-                identity = (info.st_dev, info.st_ino)
-                if identity in seen_hardlinks:
-                    continue
-                seen_hardlinks.add(identity)
-            total += info.st_size
 
-        # Children were visited first (topdown=False), so their totals are
-        # known.  A missing child is a symlinked or skipped directory, which
-        # contributes nothing by design.
-        for name in dirnames:
-            total += sizes.pop(os.path.join(dirpath, name), 0)
-
-        try:
-            info = os.lstat(dirpath)
-        except OSError:
+            stack.append(new_frame(child, child_info))
             continue
 
-        if not cross_mounts and info.st_dev != root_device:
-            continue                      # different filesystem; leave it out
+        # Every child has reported in, so this directory can be finished.
+        stack.pop()
+        cached = known.get(frame[_PATH]) if known is not None else None
 
-        sizes[dirpath] = total
-        results[dirpath] = (info.st_mtime_ns, total)
+        if cached is not None and cached[0] == frame[_MTIME] \
+                and frame[_REUSABLE]:
+            total = cached[1]
+            reused = True
+        else:
+            total = frame[_TOTAL]
+            for name in frame[_FILES]:
+                try:
+                    info = os.lstat(os.path.join(frame[_PATH], name))
+                except OSError:
+                    continue
+                # Anything that is not a directory contributes its own
+                # st_size: regular files obviously, symlinks their target
+                # path's length, fifos and sockets a harmless zero.  The
+                # re-check covers the entry having become a real directory
+                # between the scan and now, which would otherwise be counted
+                # here and again as a subdirectory.
+                if not stat.S_ISDIR(info.st_mode):
+                    total += info.st_size
+            reused = False
+
+        results[frame[_PATH]] = (frame[_MTIME], total)
+
+        if stack:
+            stack[-1][_TOTAL] += total
+            if not reused:
+                stack[-1][_REUSABLE] = False
 
         scanned += 1
-        if on_progress is not None and scanned % 2000 == 0:
-            on_progress(scanned, dirpath)
+        if on_progress is not None and scanned % progress_every == 0:
+            on_progress(scanned, frame[_PATH])
 
     return results
 
@@ -205,6 +352,149 @@ def prompt_for_drives(drives):
     return chosen
 
 
+# --- autostart ---------------------------------------------------------------
+
+
+def autostart_targets():
+    """Directories the login run should index.
+
+    `autostart_dirs=` in the config, colon-separated like PATH.  The key being
+    absent is not the same as it being empty: absent means nobody has chosen,
+    so index the home directory, which is where the folders anyone actually
+    browses live.  Empty means someone chose nothing, and nothing is what they
+    get.
+
+    The default is deliberately NOT every local drive.  The .deb installs the
+    autostart entry system-wide, so that default would have every account on
+    the machine walking every disk at its first login.
+    """
+    configured = _extension.read_config_value(_extension.AUTOSTART_DIRS_KEY)
+    if configured is None:
+        return [os.path.expanduser("~")]
+    return [os.path.abspath(os.path.expanduser(part))
+            for part in configured.split(":") if part.strip()]
+
+
+def take_index_lock():
+    """(acquired, fd).  False means another indexer is already running.
+
+    flock, not a pid file: the kernel drops it when the process dies however
+    it dies, so there is never a stale lock to detect and break, and getting
+    that detection wrong is how a pid file turns a crash into a permanent
+    refusal to run.  A login can easily start two of these -- two sessions, or
+    a manual run while the login one is still going -- and both writing the
+    same cache means one of them wasted its disk reads entirely.
+
+    Failing to create the lock file at all returns (True, None): not being
+    able to lock is a reason to be careful, not a reason to refuse to work.
+    """
+    if not _extension.CACHE_DIR:
+        return True, None
+    try:
+        os.makedirs(_extension.CACHE_DIR, exist_ok=True)
+        fd = os.open(os.path.join(_extension.CACHE_DIR, "index.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return True, None
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False, None
+    return True, fd
+
+
+def _run_autostart(args):
+    """The login run: full the first time, refresh afterwards.
+
+    Output goes to stderr, which for an autostart entry is the session
+    journal -- the same place the extension's own tracing lands, so
+    `journalctl --user -f | grep show-folder-size` shows both.
+    """
+    def report(message):
+        print("[show-folder-size-index] %s" % message, file=sys.stderr,
+              flush=True)
+
+    if not _extension.CACHE_PATH:
+        report("on-disk caching is off; nothing to index.")
+        return 0
+
+    targets = [path for path in autostart_targets() if os.path.isdir(path)]
+    if not targets:
+        report("no directories configured for indexing; nothing to do.")
+        return 0
+
+    acquired, lock_fd = take_index_lock()
+    if not acquired:
+        report("another indexer is already running; leaving it to it.")
+        return 0
+
+    try:
+        try:
+            os.nice(AUTOSTART_NICENESS)
+        except OSError:
+            pass                       # not permitted; carry on at normal
+        if args.delay > 0:
+            time.sleep(args.delay)
+
+        cache = _extension.load_cache()
+        started = time.monotonic()
+        indexed = 0
+
+        for target in targets:
+            # The whole of "full first time, refresh after", in one line: if
+            # this drive has never been indexed there is nothing to refresh
+            # from, so measure it properly; if it has, trust the cache for the
+            # parts that have not moved.
+            first_time = target not in cache
+            known = None if first_time else cache
+            drive_started = time.monotonic()
+
+            found = index_tree(target, cross_mounts=args.cross_mounts,
+                               known=known)
+            cache.update(found)
+            indexed += len(found)
+            report("%s: %d directories, %s, %.1fs (%s)"
+                   % (target, len(found),
+                      _extension.format_size(found.get(target, (0, 0))[1]),
+                      time.monotonic() - drive_started,
+                      "full" if first_time else "refresh"))
+
+        cache = _cap_cache(cache, args.max_entries, report)
+
+        if _extension.save_cache(cache):
+            report("wrote %d entries to %s in %.1fs total"
+                   % (len(cache), _extension.CACHE_PATH,
+                      time.monotonic() - started))
+            return 0
+
+        report("could not write %s" % _extension.CACHE_PATH)
+        return 1
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)          # releases the flock with it
+
+
+def _cap_cache(cache, max_entries, report):
+    """Trim to `max_entries`, keeping the biggest directories.
+
+    The big ones are the ones worth not measuring again; a small folder is
+    near-instant to measure on demand anyway.
+    """
+    if len(cache) <= max_entries:
+        return cache
+    dropped = len(cache) - max_entries
+    kept = sorted(cache.items(), key=lambda item: item[1][1],
+                  reverse=True)[:max_entries]
+    report("cache capped at %d entries (dropped the %d smallest); "
+           "raise --max-entries to keep more." % (max_entries, dropped))
+    return dict(kept)
+
+
+# --- command line ------------------------------------------------------------
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="show-folder-size-index",
@@ -222,11 +512,28 @@ def main(argv=None):
                         help="measure and report, but write nothing")
     parser.add_argument("--cross-mounts", action="store_true",
                         help="descend into other filesystems (default: don't)")
+    parser.add_argument("--refresh", action="store_true",
+                        help="re-measure only folders whose directory mtime "
+                             "changed since the last run; much faster, and "
+                             "misses files that grew in place")
+    parser.add_argument("--autostart", action="store_true",
+                        help="the mode the login entry runs: index the "
+                             "configured directories in full the first time "
+                             "and refresh them after, quietly, at low "
+                             "priority, one instance at a time")
+    parser.add_argument("--delay", type=int, default=AUTOSTART_DELAY_S,
+                        metavar="SECONDS",
+                        help="with --autostart, wait this long before "
+                             "starting so the login is not slowed "
+                             "(default: %(default)s)")
     parser.add_argument("--max-entries", type=int,
                         default=_extension.CACHE_LIMIT,
                         help="cap the cache at this many directories, keeping "
                              "the largest (default: %(default)s)")
     args = parser.parse_args(argv)
+
+    if args.autostart:
+        return _run_autostart(args)
 
     drives = list_drives()
 
@@ -259,66 +566,80 @@ def main(argv=None):
               "the extension, or use --dry-run.", file=sys.stderr)
         return 1
 
-    # Merge into whatever is already cached rather than replacing it.
-    cache = _extension.load_cache() if not args.dry_run else {}
-    print("Cache: %s" % (_extension.CACHE_PATH or "(disabled, dry run)"))
-    print("Starting with %d cached directories.\n" % len(cache))
-
-    started = time.monotonic()
-    indexed_total = 0
+    # Not under --dry-run: the lock exists to stop two runs writing the same
+    # cache, a run that writes nothing cannot collide with anything, and
+    # taking it would mean creating a file in the very mode whose whole
+    # promise is that it creates none.
+    acquired, lock_fd = (True, None) if args.dry_run else take_index_lock()
+    if not acquired:
+        print("error: another show-folder-size-index is already running "
+              "(the login one, most likely). Wait for it to finish.",
+              file=sys.stderr)
+        return 1
 
     try:
-        for target in targets:
-            print("Indexing %s ..." % target)
-            drive_started = time.monotonic()
+        # Merge into whatever is already cached rather than replacing it.
+        cache = _extension.load_cache() if not args.dry_run else {}
+        print("Cache: %s" % (_extension.CACHE_PATH or "(disabled, dry run)"))
+        print("Starting with %d cached directories.\n" % len(cache))
 
-            def progress(scanned, current, _t=drive_started):
-                print("    %6d directories, %5.1fs  %s"
-                      % (scanned, time.monotonic() - _t, current[:70]),
-                      flush=True)
+        # A manual run measures everything unless asked not to.  Refresh is
+        # opt-in rather than automatic here because someone who types this
+        # command has a reason to distrust the cache.
+        known = cache if args.refresh and cache else None
+        if args.refresh and not cache:
+            print("Nothing cached yet, so this first pass is a full one.\n")
 
-            found = index_tree(target, cross_mounts=args.cross_mounts,
-                               on_progress=progress)
-            cache.update(found)
-            indexed_total += len(found)
+        started = time.monotonic()
+        indexed_total = 0
 
-            root_size = found.get(target, (0, 0))[1]
-            print("  %d directories, %s total, %.1fs\n"
-                  % (len(found), _extension.format_size(root_size),
-                     time.monotonic() - drive_started))
-    except KeyboardInterrupt:
-        # Keep what was measured: an interrupted index is still useful, and
-        # throwing away several minutes of disk reads because of a Ctrl-C is
-        # the sort of thing that makes people not run it again.
-        print("\nInterrupted -- saving what was indexed so far.")
+        try:
+            for target in targets:
+                print("Indexing %s ..." % target)
+                drive_started = time.monotonic()
 
-    if len(cache) > args.max_entries:
-        # Keep the biggest directories: they are the ones worth not measuring
-        # again, and small ones are near-instant anyway.
-        dropped = len(cache) - args.max_entries
-        kept = sorted(cache.items(), key=lambda item: item[1][1],
-                      reverse=True)[:args.max_entries]
-        cache = dict(kept)
-        print("Cache capped at %d entries (dropped %d smallest). "
-              "Raise --max-entries to keep more."
-              % (args.max_entries, dropped))
+                def progress(scanned, current, _t=drive_started):
+                    print("    %6d directories, %5.1fs  %s"
+                          % (scanned, time.monotonic() - _t, current[:70]),
+                          flush=True)
 
-    elapsed = time.monotonic() - started
-    print("Indexed %d directories in %.1fs." % (indexed_total, elapsed))
+                found = index_tree(target, cross_mounts=args.cross_mounts,
+                                   on_progress=progress, known=known)
+                cache.update(found)
+                indexed_total += len(found)
 
-    if args.dry_run:
-        print("Dry run: nothing written.")
-        return 0
+                root_size = found.get(target, (0, 0))[1]
+                print("  %d directories, %s total, %.1fs\n"
+                      % (len(found), _extension.format_size(root_size),
+                         time.monotonic() - drive_started))
+        except KeyboardInterrupt:
+            # Keep what was measured: an interrupted index is still useful,
+            # and throwing away several minutes of disk reads because of a
+            # Ctrl-C is the sort of thing that makes people not run it again.
+            print("\nInterrupted -- saving what was indexed so far.")
 
-    if _extension.save_cache(cache):
-        print("Wrote %d entries to %s" % (len(cache), _extension.CACHE_PATH))
-        print("\nRestart nautilus (nautilus -q) to pick up the new cache.")
-        return 0
+        cache = _cap_cache(cache, args.max_entries, print)
 
-    print("error: could not write the cache. Run with the debug marker "
-          "(~/.config/show-folder-size-nautilus-debug) for the reason.",
-          file=sys.stderr)
-    return 1
+        elapsed = time.monotonic() - started
+        print("Indexed %d directories in %.1fs." % (indexed_total, elapsed))
+
+        if args.dry_run:
+            print("Dry run: nothing written.")
+            return 0
+
+        if _extension.save_cache(cache):
+            print("Wrote %d entries to %s"
+                  % (len(cache), _extension.CACHE_PATH))
+            print("\nRestart nautilus (nautilus -q) to pick up the new cache.")
+            return 0
+
+        print("error: could not write the cache. Run with the debug marker "
+              "(~/.config/show-folder-size-nautilus-debug) for the reason.",
+              file=sys.stderr)
+        return 1
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 if __name__ == "__main__":
