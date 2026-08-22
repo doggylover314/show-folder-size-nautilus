@@ -487,12 +487,38 @@ def _cap_cache(cache, max_entries, report):
     dropped = len(cache) - max_entries
     kept = sorted(cache.items(), key=lambda item: item[1][1],
                   reverse=True)[:max_entries]
-    report("cache capped at %d entries (dropped the %d smallest); "
-           "raise --max-entries to keep more." % (max_entries, dropped))
+    # Names the config key as well as the flag, because the run that hits this
+    # most often is the login one, and it is started by a .desktop file the
+    # user is told not to edit -- so "raise --max-entries" was advice they had
+    # no way to take.
+    report("cache capped at %d entries (dropped the %d smallest); raise "
+           "%s= in ~/.config/show-folder-size-nautilus.conf, or pass "
+           "--max-entries, to keep more."
+           % (max_entries, dropped, _extension.MAX_ENTRIES_KEY))
     return dict(kept)
 
 
 # --- command line ------------------------------------------------------------
+
+
+def default_max_entries():
+    """The cache cap: `max_entries=` from the config, else the built-in.
+
+    Configurable because the run that hits the cap is usually the login one,
+    which is started from a .desktop file in /etc that users are specifically
+    told not to edit. Without this there was no way for them to raise it.
+    """
+    configured = _extension.read_config_value(_extension.MAX_ENTRIES_KEY)
+    if configured:
+        try:
+            value = int(configured)
+        except ValueError:
+            print("warning: ignoring %s=%r, which is not a number"
+                  % (_extension.MAX_ENTRIES_KEY, configured), file=sys.stderr)
+        else:
+            if value > 0:
+                return value
+    return _extension.CACHE_LIMIT
 
 
 def main(argv=None):
@@ -527,9 +553,10 @@ def main(argv=None):
                              "starting so the login is not slowed "
                              "(default: %(default)s)")
     parser.add_argument("--max-entries", type=int,
-                        default=_extension.CACHE_LIMIT,
+                        default=default_max_entries(),
                         help="cap the cache at this many directories, keeping "
-                             "the largest (default: %(default)s)")
+                             "the largest (default: %(default)s, settable as "
+                             "max_entries= in the config file)")
     args = parser.parse_args(argv)
 
     if args.autostart:

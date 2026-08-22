@@ -125,6 +125,25 @@ different ways this project measures a folder finally agree on the answer.
 - The self-test printed the fallback's answer for an empty folder, because
   `gio_bytes or walk_bytes` treats a legitimate 0 as absent.
 
+- **The self test's timings were not comparable, and misled its own authors.**
+  It measured GIO and then `os.walk`, so the first read from disk and the
+  second read from RAM: on a 6.5 GB directory that reported GIO at 18.28s
+  against `os.walk` at 0.27s. Warming both first reverses it to 0.13s against
+  0.28s, GIO being about 2x faster. A diagnostic that exists to separate
+  "measuring is slow" from "delivery is broken" must not be the thing that
+  misleads you. The header's "~6x faster" claim, which rested on the same
+  method, is now given as a range with both measurements and their conditions.
+- **The cache limit was too small to hold one real home directory.** A test
+  machine's had 46,686 directories against a cap of 20,000, so every login
+  index measured all of them and then discarded 57% of the result, saying so
+  each time. A cap that fires on ordinary use is a bug with a log line, not a
+  safety limit. Raised to 100,000, sized by measuring that cache at 147 bytes
+  per entry on disk and 122 in memory: about 15 MB and 12 MB at the very top
+  end. It is also now settable as `max_entries=` in the config file, because
+  the run that hits it is the login one, started from a `.desktop` file in
+  `/etc` that users are told not to edit, so "raise `--max-entries`" was
+  advice they had no way to take.
+
 ### Changed
 - The setup window checks for Stop every 200 directories instead of every
   2000. A Stop button that takes a minute to respond reads as a hang.

@@ -97,12 +97,21 @@ WHY IT IS BUILT THIS WAY (three bugs' worth of hard-won detail)
   every single file.  Follow the host, don't invent a convention.
 
 * Measurement uses Gio.File.measure_disk_usage() rather than a Python walk.
-  It is ~6x faster (measured: 189 GB / 314k files in 0.8s vs 4.9s) and it
-  releases the GIL properly -- four concurrent measurements take 0.14s against
-  0.11s for one, and a measuring worker leaves the main thread running Python
-  at full speed.  (An earlier revision of this comment claimed GIL contention
-  from os.walk was starving Nautilus' main thread.  That was measured badly
-  and overstated: the speed is the honest reason, not the contention.)
+  It is faster, and it releases the GIL properly -- four concurrent
+  measurements take 0.14s against 0.11s for one, and a measuring worker
+  leaves the main thread running Python at full speed.  (An earlier revision
+  of this comment claimed GIL contention from os.walk was starving Nautilus'
+  main thread.  That was measured badly and overstated: the speed is the
+  honest reason, not the contention.)
+
+  How MUCH faster depends on the tree, and the honest range is narrower than
+  this comment used to claim.  Recorded measurements: 189 GB / 314k files at
+  0.8s against 4.9s, about 6x; a 6.5 GB cache directory at 0.129s against
+  0.276s, about 2x.  Both warm.  Treat 2x as the number to expect and 6x as
+  the good case, not the other way round -- and note that any comparison
+  where one method runs first against a cold page cache is measuring the
+  disk, not the method.  That mistake was in this file's own self test until
+  v1.0.0 and it reported a 68x difference in the WRONG direction.
 
 * Results are posted to the main thread with GLib.idle_add() at
   PRIORITY_DEFAULT, NOT PRIORITY_DEFAULT_IDLE.  A busy Nautilus main loop can
@@ -224,7 +233,18 @@ COLUMN_LABEL = "Total Size"
 PENDING_TEXT = "Calculating..."
 
 WORKER_COUNT = 4          # background threads driving the measurement
-CACHE_LIMIT = 20000       # max remembered path -> (mtime, bytes) entries
+# Raised from 20000 in v1.0.0 because 20000 was simply too small to hold one
+# real home directory: a test machine's had 46,686 directories in it, so every
+# single login index measured the lot and then threw away 57% of the result,
+# announcing that it had. A cap that fires on ordinary use is not a safety
+# limit, it is a bug with a log line.
+#
+# 100000 is sized from measurement rather than taste. That same cache came out
+# at 147 bytes per entry on disk and 122 in memory, so this is about 15 MB of
+# JSON and 12 MB resident inside nautilus at the very top end -- affordable,
+# and roughly double the headroom that machine needed.
+CACHE_LIMIT = 100000      # max remembered path -> (mtime, bytes) entries
+MAX_ENTRIES_KEY = "max_entries"   # config override, see the indexer
 REFRESH_ATTEMPTS = 4      # how many times to nudge Nautilus to re-read a value
 REFRESH_INTERVAL_MS = 750
 WATCHDOG_INTERVAL_S = 5   # how often to look for lost work
@@ -1111,8 +1131,25 @@ if __name__ == "__main__":
     for target in targets:
         print("measuring %s ..." % target, flush=True)
 
-        begin = time.monotonic()
+        # Warm the page cache with a throwaway pass of each before timing
+        # anything.  Without this the first measurement reads from the disk
+        # and the second reads from RAM, so the numbers say nothing about the
+        # two methods and everything about which one went first -- on a 6.5 GB
+        # cache directory that reported GIO at 18.28s against os.walk at
+        # 0.27s, a 68x "difference" that reversed to GIO being 2.1x FASTER
+        # once both were warm.  A diagnostic whose entire purpose is telling
+        # "measuring is slow" from "delivery is broken" must not be the thing
+        # that misleads you.
+        print("  warming the cache (timings below are from a second pass,"
+              " so they compare) ...", flush=True)
         gio_error = None
+        try:
+            _measure_with_gio(target, None)
+        except GLib.Error:
+            pass
+        _measure_with_walk(target)
+
+        begin = time.monotonic()
         try:
             gio_bytes = _measure_with_gio(target, None)
         except GLib.Error as err:

@@ -229,7 +229,8 @@ key makes, which is why it also watches directories, but it is why a plain run
 without the flag still measures everything.
 
 Ctrl-C saves what it has already measured rather than discarding the work. The
-cache is capped (`--max-entries`, default 20000) keeping the **largest**
+cache is capped (`--max-entries`, or `max_entries=` in the config file,
+default 100000) keeping the **largest**
 directories, since those are the ones worth not measuring again. Only one
 indexer runs at a time, enforced with a lock file.
 
