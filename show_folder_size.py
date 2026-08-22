@@ -233,17 +233,24 @@ COLUMN_LABEL = "Total Size"
 PENDING_TEXT = "Calculating..."
 
 WORKER_COUNT = 4          # background threads driving the measurement
-# Raised from 20000 in v1.0.0 because 20000 was simply too small to hold one
-# real home directory: a test machine's had 46,686 directories in it, so every
-# single login index measured the lot and then threw away 57% of the result,
+# Raised from 20000 in v1.0.0 because 20000 was too small to hold one real
+# home directory: a test machine's had 46,686 directories in it, so every
+# login index measured the lot and then threw away 57% of the result,
 # announcing that it had. A cap that fires on ordinary use is not a safety
 # limit, it is a bug with a log line.
 #
-# 100000 is sized from measurement rather than taste. That same cache came out
-# at 147 bytes per entry on disk and 122 in memory, so this is about 15 MB of
-# JSON and 12 MB resident inside nautilus at the very top end -- affordable,
-# and roughly double the headroom that machine needed.
-CACHE_LIMIT = 100000      # max remembered path -> (mtime, bytes) entries
+# Then raised again to 1000000 by request. Measured at that size, on a cache
+# averaging 120-character paths: a 158 MB file, 80 MB resident, 2.6s to
+# serialise and 1.9s to load. Two things had to change first, because at
+# 20000 entries they were invisible and at 1000000 they are not:
+#
+#   * the save snapshot moved off the GTK main thread (see _save)
+#   * the initial load moved off it too (see _load_cache_worker)
+#
+# Anyone finding this file slow to load should turn it DOWN with max_entries=
+# in the config rather than assuming a big number is free. It is affordable,
+# not free.
+CACHE_LIMIT = 1000000     # max remembered path -> (mtime, bytes) entries
 MAX_ENTRIES_KEY = "max_entries"   # config override, see the indexer
 REFRESH_ATTEMPTS = 4      # how many times to nudge Nautilus to re-read a value
 REFRESH_INTERVAL_MS = 750
@@ -664,10 +671,14 @@ def save_cache(entries):
     if not CACHE_PATH:
         return False
 
+    # Accepts a mapping or an already-flattened sequence of (path, (mtime,
+    # bytes)) pairs.  The extension passes the latter, snapshotted on a worker
+    # thread; the indexer and the setup window pass dicts.
+    pairs = entries.items() if hasattr(entries, "items") else entries
+
     payload = {
         "format": CACHE_FORMAT,
-        "entries": {path: [mtime, size] for path, (mtime, size)
-                    in entries.items()},
+        "entries": {path: [mtime, size] for path, (mtime, size) in pairs},
     }
 
     handle = None
@@ -693,7 +704,8 @@ def save_cache(entries):
         handle = None
         os.replace(temp_path, CACHE_PATH)
         temp_path = None
-        _log("saved %d cached sizes to %s" % (len(entries), CACHE_PATH))
+        _log("saved %d cached sizes to %s"
+             % (len(payload["entries"]), CACHE_PATH))
         return True
     except Exception as exc:
         _log("could not save cache: %r" % (exc,))
@@ -722,7 +734,14 @@ class ShowFolderSizeColumn(GObject.GObject,
         super().__init__()
         # Everything below is touched only from the GTK main thread except
         # _work_queue, which is the thread-safe handoff to the workers.
-        self._cache = load_cache()    # path -> (mtime_ns, bytes)
+        # Loaded on a worker, not here.  This runs while nautilus is starting,
+        # and at CACHE_LIMIT the read is 1.1s of json.load plus 0.8s of
+        # rebuilding the dict -- two seconds of a file manager not appearing,
+        # which its user would rightly blame on whatever they installed last.
+        # Until it arrives every lookup simply misses, which costs a
+        # measurement that was going to happen anyway on a cold cache.
+        self._cache = OrderedDict()   # path -> (mtime_ns, bytes)
+        self._cache_loaded = False
         self._jobs = {}               # path -> [FileInfo, ...]
         self._queued_at = {}          # path -> monotonic seconds
         self._requeues = {}           # path -> times the watchdog re-queued it
@@ -734,6 +753,40 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._work_queue = queue.SimpleQueue()
         self._workers = []
         _ensure_column_visible()
+        threading.Thread(target=self._load_cache_worker,
+                         name="show-folder-size-load", daemon=True).start()
+
+    def _load_cache_worker(self):
+        """Read the cache off the main thread, then hand it over."""
+        try:
+            entries = load_cache()
+        except Exception as exc:              # never take nautilus down
+            _log("cache load failed: %r" % (exc,))
+            entries = OrderedDict()
+        GLib.idle_add(self._on_cache_loaded, entries,
+                      priority=GLib.PRIORITY_DEFAULT)
+
+    def _on_cache_loaded(self, entries):
+        """Main thread: merge the file under whatever was measured meanwhile.
+
+        `entries.update(self._cache)` and not the other way round: anything
+        measured while the file was being read is newer than the file, and
+        letting the file win would throw away fresh results and, worse,
+        resurrect stale sizes for directories that had just been re-measured.
+        """
+        entries.update(self._cache)
+        self._cache = entries
+        while len(self._cache) > CACHE_LIMIT:
+            self._cache.popitem(last=False)
+        self._cache_loaded = True
+        _log("cache ready: %d entries" % len(self._cache))
+
+        # A save deferred because the cache had not loaded yet still needs to
+        # happen; without this a measurement made during the load would sit
+        # unsaved until the next unrelated change.
+        if self._dirty:
+            self._schedule_save()
+        return GLib.SOURCE_REMOVE
 
     # -- Nautilus.ColumnProvider --------------------------------------------
 
@@ -995,7 +1048,10 @@ class ShowFolderSizeColumn(GObject.GObject,
         writing the whole file each time would be pointless churn.
         """
         self._dirty = True
-        if CACHE_PATH and self._save_id is None:
+        # Not before the cache has finished loading.  Saving first would write
+        # the handful of entries measured so far OVER the full file that is
+        # still being read, destroying it.
+        if CACHE_PATH and self._save_id is None and self._cache_loaded:
             self._save_id = GLib.timeout_add_seconds(SAVE_DELAY_S, self._save)
 
     def _save(self):
@@ -1003,12 +1059,34 @@ class ShowFolderSizeColumn(GObject.GObject,
         if not self._dirty:
             return GLib.SOURCE_REMOVE
         self._dirty = False
-        # Copy on the main thread, write off it: serialising 20k entries is
-        # not something to do in the middle of the file manager's event loop.
-        snapshot = OrderedDict(self._cache)
-        threading.Thread(target=save_cache, args=(snapshot,),
+        threading.Thread(target=self._save_worker,
                          name="show-folder-size-save", daemon=True).start()
         return GLib.SOURCE_REMOVE
+
+    def _save_worker(self):
+        """Snapshot and write, both off the main thread.
+
+        The snapshot used to be taken here on the MAIN thread, as
+        OrderedDict(self._cache), on the reasoning that the writer must not
+        iterate a dict the main thread is mutating.  At 20000 entries that
+        copy was unnoticeable.  At CACHE_LIMIT it measures 539ms -- a
+        half-second freeze of the file manager every time the cache is
+        written, which is a far worse bug than the one it was avoiding.
+
+        list() over a dict view is a C loop that never runs Python code, so it
+        never drops the GIL, so it cannot observe a half-applied mutation:
+        833,000 mutations against 64 concurrent snapshots produced no
+        RuntimeError and no short reads.  The snapshot is therefore taken
+        here, on the worker, and the main thread pays nothing at all.
+
+        It is not a point-in-time snapshot of the whole cache, and does not
+        need to be.  Entries are independent, and one that is a moment stale
+        fails its mtime check and gets measured again.
+        """
+        try:
+            save_cache(list(self._cache.items()))
+        except Exception as exc:
+            _log("save failed: %r" % (exc,))
 
     # -- filesystem monitoring -----------------------------------------------
 

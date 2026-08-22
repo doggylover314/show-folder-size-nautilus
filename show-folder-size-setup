@@ -466,13 +466,32 @@ class SetupWindow(Adw.ApplicationWindow):
         return group
 
     def _rescan_caches(self):
-        """Auto-detect. Re-runnable, because the answer changes.
+        """Auto-detect, off the main thread. Re-runnable, because the answer
+        changes: someone can plug in the drive their old cache lives on while
+        this window is open, and a scan that only ran at startup would keep
+        insisting there is nothing there.
 
-        Someone can plug in the drive their old cache lives on, or move a
-        file, while this window is open, and a detection that only ever ran at
-        startup would keep insisting there is nothing there.
+        Threaded because detection parses each candidate cache to report how
+        many folders it holds, and a cache at the current CACHE_LIMIT takes
+        about two seconds to parse. With up to four candidate locations that
+        is a settings window that hangs for several seconds before it draws.
         """
-        self._cache_choices = self._extension.find_existing_caches()
+        self._cache_dropdown.set_sensitive(False)
+        scanning = Gtk.StringList()
+        scanning.append("Scanning...")
+        self._cache_dropdown.set_model(scanning)
+        threading.Thread(target=self._scan_worker,
+                         name="show-folder-size-scan", daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            found = self._extension.find_existing_caches()
+        except Exception:
+            found = []
+        GLib.idle_add(self._on_caches_found, found)
+
+    def _on_caches_found(self, found):
+        self._cache_choices = found
 
         labels = Gtk.StringList()
         for path, version, count, modified in self._cache_choices:
@@ -485,6 +504,7 @@ class SetupWindow(Adw.ApplicationWindow):
 
         self._cache_dropdown.set_model(labels)
         self._cache_dropdown.set_sensitive(bool(self._cache_choices))
+        return GLib.SOURCE_REMOVE
 
     def _chosen_import_source(self):
         """The file the Import button should read, or None with a reason said.
