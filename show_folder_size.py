@@ -23,17 +23,30 @@ a mismatch.  This column is only about folders.
 SAFETY / AUDIT NOTES  (this is the whole story -- grep the file to confirm)
 --------------------------------------------------------------------------
 READ THIS IF YOU AUDITED AN EARLIER VERSION.  Up to and including v0.2.2 this
-extension wrote nothing at all.  That is no longer true: since v0.3.0 it
-writes exactly ONE file, its size cache.  Everything else is unchanged.
+extension wrote nothing at all.  v0.3.0 added one written file, the size
+cache.  v0.6.0 adds two more writes, both one-off, listed below.
 
-  * Writes exactly one file: the size cache (see CACHE_PATH below, by default
+  * Writes the size cache (see CACHE_PATH below, by default
     ~/.cache/show-folder-size-nautilus/sizes.json).  It is written atomically --
     a temporary file in the same directory, then os.replace() -- so a crash
     mid-write cannot corrupt it.  It contains directory paths, their
     modification times and their sizes in bytes.  Nothing else.  It is safe to
     delete at any time; the extension just rebuilds it.
-    If you want the old no-writes behaviour, set the cache path to an empty
-    value (see CONFIGURATION) and nothing is ever written.
+    Set the cache path to an empty value (see CONFIGURATION) and this file is
+    never written.
+  * ONCE, on the first load ever, sets one GSettings key to make this column
+    visible: org.gnome.nautilus.list-view default-visible-columns.  See
+    _ensure_column_visible() for why a packaged schema override cannot do this
+    on its own.  It happens exactly once and never reverses a later choice of
+    yours.  This is a dconf write, so it lands in
+    ~/.config/dconf/user like every other GNOME setting.
+  * ONCE, alongside that, writes the marker file
+    ~/.config/show-folder-size-nautilus-column-added, which is what makes it
+    happen only once.  Create it yourself beforehand and neither write above
+    ever occurs.
+  * Note that the two writes above are NOT disabled by emptying the cache
+    path -- that setting governs the size cache only.  To have this extension
+    touch nothing at all, create the marker file and empty the cache path.
   * All other filesystem access is reads.  Sizes come from
     Gio.File.measure_disk_usage() (the same GIO call Nautilus' own Properties
     window uses), with os.walk() + os.stat() as a fallback.  There is no
@@ -47,6 +60,14 @@ writes exactly ONE file, its size cache.  Everything else is unchanged.
   * No symlink following.  GIO does not descend into symlinked directories,
     and the os.walk fallback passes followlinks=False and skips symlinks, so
     there are no link loops and no directory tree is counted twice.
+  * Hard links ARE counted once per link, not once per inode, so a file with
+    two names inside the tree contributes its size twice.  That is what
+    Gio.File.measure_disk_usage() does (verified by measurement, not assumed),
+    and therefore what the Properties window reports, so this follows it --
+    see "Follow the host" below.  It is also why the os.walk fallback and
+    show-folder-size-index no longer de-duplicate by (st_dev, st_ino): they
+    used to, which made a pre-indexed folder disagree with the same folder
+    measured live.  `du` de-duplicates, so totals here can exceed `du`.
   * Imports are stdlib + PyGObject only: os, stat, sys, json, queue, tempfile,
     threading, time, collections, gi (GObject/GLib/Gio/Nautilus).  No
     third-party dependencies.
@@ -135,6 +156,10 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
 --------------------------------------------------------------------
 * Nautilus' built-in "Size" column cannot be hidden by an extension.  If you
   want only this one, untick "Size" yourself in Visible Columns.
+* Uninstalling cannot un-tick this column.  Enabling it writes a dconf value
+  belonging to your account rather than to the package, so removing the
+  package leaves it set.  Untick it, or run
+  `gsettings reset org.gnome.nautilus.list-view default-visible-columns`.
 * Deep changes are only noticed in directories currently being watched (the
   ones you have visited recently, up to MONITOR_LIMIT).  Change a file three
   levels below a folder nobody is watching and its cached total stays stale
@@ -144,7 +169,9 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
   sorts alphabetically ("9.9 kB" before "1.2 GB"), not numerically.  The
   extension API has no sort-key hook, so this cannot be fixed from here.
 * Totals are apparent size (sum of file sizes), not allocated blocks, so they
-  differ slightly from `du` on sparse files.
+  differ slightly from `du` on sparse files, and hard-linked files are counted
+  once per link rather than once per inode, so they can exceed `du` on trees
+  that use hard links heavily.  Both match the Properties window.
 * Measurement crosses mount points, so a folder containing a mounted volume
   includes that volume's contents.
 * Only local ("file://") locations are measured; other URI schemes get a blank
@@ -187,7 +214,7 @@ import gi
 gi.require_version("Nautilus", "4.0")
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -202,8 +229,12 @@ REFRESH_ATTEMPTS = 4      # how many times to nudge Nautilus to re-read a value
 REFRESH_INTERVAL_MS = 750
 WATCHDOG_INTERVAL_S = 5   # how often to look for lost work
 STUCK_SECONDS = 45        # a measurement taking this long was lost, not slow
+REQUEUE_LIMIT = 2         # give up rather than pile duplicates onto the queue
 MONITOR_LIMIT = 256       # max directories watched at once (inotify is finite)
 SAVE_DELAY_S = 10         # quiet period before the cache is written to disk
+WORKER_BACKOFF_S = 0.1    # pause after an unexpected worker error, see below
+
+CACHE_ENV_VAR = "SHOW_FOLDER_SIZE_CACHE"
 
 CONFIG_FILES = (
     os.path.join(os.path.expanduser("~"), ".config",
@@ -211,30 +242,76 @@ CONFIG_FILES = (
     "/etc/show-folder-size-nautilus.conf",
 )
 
+# This project was called nautilus-total-size up to 0.4.0, and that name is in
+# the paths, not just the package: an upgrade from it has to be able to find
+# the cache it left behind, or the user silently loses however long they spent
+# indexing.  Kept as data rather than folded into the loops below, because the
+# only thing that makes these paths special is history.
+LEGACY_CACHE_NAME = "nautilus-total-size"
+LEGACY_CONFIG_FILES = (
+    os.path.join(os.path.expanduser("~"), ".config",
+                 "nautilus-total-size.conf"),
+    "/etc/nautilus-total-size.conf",
+)
 
-def _configured_cache_dir():
-    """Resolve the cache directory.  '' anywhere means 'do not cache to disk'.
+# Setting an environment variable from a program does not affect any other
+# process, and this project already learned the hard way that a shell-set
+# variable never reaches nautilus, which is D-Bus activated (see DEBUGGING
+# above).  The one place a variable CAN be set so that a D-Bus activated
+# process inherits it is systemd's user environment generator directory: the
+# user manager reads it at login and applies it to everything it starts.
+# It therefore needs a fresh login, and it OVERRIDES the config file, being
+# first in the precedence list -- both of which the setup window says out loud
+# before writing anything here.
+ENVIRONMENT_D_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or
+    os.path.join(os.path.expanduser("~"), ".config"),
+    "environment.d", "60-show-folder-size-nautilus.conf")
 
-    Precedence: environment, then user config, then system config (which is
-    what the .deb installer writes), then the XDG default.  Read-only: this
-    only ever opens config files for reading.
+
+def read_config_value(name, files=None):
+    """First `name=` value from the user config, else the system one.
+
+    Returns None when the key is in neither file, which is deliberately
+    distinct from the key being present and empty: "" is an explicit "off"
+    (no cache, no autostart directories) and must not be confused with "the
+    admin never said".  Read-only: this only ever opens files for reading.
+
+    Shared with show-folder-size-index and show-folder-size-setup so that all
+    three agree on what the config files mean.  Two parsers for one file
+    format is how they drift apart.
+
+    `files` overrides which config files are consulted, which is what lets the
+    upgrade path read the pre-0.5.0 ones by the same rules.
     """
-    from_env = os.environ.get("SHOW_FOLDER_SIZE_CACHE")
-    if from_env is not None:
-        return from_env.strip()
-
-    for config_path in CONFIG_FILES:
+    for config_path in (files if files is not None else CONFIG_FILES):
         try:
             with open(config_path, "r", encoding="utf-8") as handle:
                 for line in handle:
                     line = line.strip()
                     if line.startswith("#") or "=" not in line:
                         continue
-                    name, _, value = line.partition("=")
-                    if name.strip() == "cache_dir":
-                        return os.path.expanduser(value.strip())
+                    key, _, value = line.partition("=")
+                    if key.strip() == name:
+                        return value.strip()
         except OSError:
             continue
+    return None
+
+
+def _configured_cache_dir():
+    """Resolve the cache directory.  '' anywhere means 'do not cache to disk'.
+
+    Precedence: environment, then user config, then system config (which is
+    what the .deb installer writes), then the XDG default.
+    """
+    from_env = os.environ.get(CACHE_ENV_VAR)
+    if from_env is not None:
+        return from_env.strip()
+
+    configured = read_config_value("cache_dir")
+    if configured is not None:
+        return os.path.expanduser(configured)
 
     xdg = os.environ.get("XDG_CACHE_HOME") or \
         os.path.join(os.path.expanduser("~"), ".cache")
@@ -243,7 +320,39 @@ def _configured_cache_dir():
 
 CACHE_DIR = _configured_cache_dir()
 CACHE_PATH = os.path.join(CACHE_DIR, "sizes.json") if CACHE_DIR else ""
-CACHE_FORMAT = 1
+# Bumped to 2 in v1.0.0.  The on-disk shape did not change; what a byte count
+# MEANS did.  A cache written before then may hold totals that de-duplicated
+# hard links and ignored symlink sizes, and nothing would ever correct them --
+# entries are keyed by directory mtime, and fixing how we count does not touch
+# any directory's mtime, so a wrong number would sit there being served as a
+# cache hit indefinitely.  A format bump makes load_cache() discard the lot and
+# measure again, which is the only way those entries ever get fixed.
+CACHE_FORMAT = 2
+
+# --- autostart -------------------------------------------------------------
+#
+# The extension itself does nothing with these; it owns them because it is the
+# module both show-folder-size-index and show-folder-size-setup already import,
+# and one of them writes the file the other reads.  A filename agreed in two
+# places is a filename that will disagree in one of them eventually.
+#
+# The .deb ships the system-wide entry in /etc/xdg/autostart.  Per the XDG
+# autostart spec a file of the SAME NAME in ~/.config/autostart replaces it,
+# so switching it off for one account means writing that name there with
+# Hidden=true -- not deleting anything owned by the package, which a normal
+# user cannot do anyway.
+
+AUTOSTART_DESKTOP_NAME = "io.github.doggylover314.ShowFolderSizeIndex.desktop"
+AUTOSTART_SYSTEM_PATH = os.path.join("/etc/xdg/autostart",
+                                     AUTOSTART_DESKTOP_NAME)
+AUTOSTART_USER_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or
+    os.path.join(os.path.expanduser("~"), ".config"),
+    "autostart", AUTOSTART_DESKTOP_NAME)
+
+# Colon-separated, like PATH.  Absent means "not configured" and the indexer
+# falls back to the home directory; empty means "the user chose nothing".
+AUTOSTART_DIRS_KEY = "autostart_dirs"
 
 _DEBUG_MARKER = os.path.join(
     os.path.expanduser("~"), ".config", "show-folder-size-nautilus-debug")
@@ -269,6 +378,67 @@ def _log(message):
         print("[show-folder-size] %s" % message, file=sys.stderr, flush=True)
     except Exception:
         pass
+
+
+# --- first-run column visibility --------------------------------------------
+
+NAUTILUS_LIST_SCHEMA = "org.gnome.nautilus.list-view"
+VISIBLE_COLUMNS_KEY = "default-visible-columns"
+COLUMN_ORDER_KEY = "default-column-order"
+
+_COLUMN_MARKER = os.path.join(
+    os.path.expanduser("~"), ".config",
+    "show-folder-size-nautilus-column-added")
+
+
+def _ensure_column_visible():
+    """Tick "Total Size" in Visible Columns once, the first time we ever load.
+
+    The packaged gschema override only changes the *default* value of
+    `default-visible-columns`.  Ticking any column in the UI writes a dconf
+    value, and a dconf value beats a schema default permanently -- so for
+    anyone who has ever opened Visible Columns, the override alone is inert.
+    This closes that gap from inside the user's own session, which is the only
+    place their dconf is writable (a package's postinst runs as root and has
+    no business writing into anyone's dconf).
+
+    Done exactly once, recorded by a marker file, so that unticking the column
+    afterwards sticks.  A column that silently re-enables itself on every
+    restart is one you end up uninstalling the extension to be rid of.
+    """
+    if os.path.exists(_COLUMN_MARKER):
+        return
+
+    try:
+        source = Gio.SettingsSchemaSource.get_default()
+        if source is None or source.lookup(NAUTILUS_LIST_SCHEMA, True) is None:
+            return          # not GNOME Files, or its schemas aren't installed
+        settings = Gio.Settings.new(NAUTILUS_LIST_SCHEMA)
+
+        for key in (VISIBLE_COLUMNS_KEY, COLUMN_ORDER_KEY):
+            columns = list(settings.get_strv(key))
+            if COLUMN_ID not in columns:
+                settings.set_strv(key, columns + [COLUMN_ID])
+                _log("enabled %s in %s" % (COLUMN_ID, key))
+        Gio.Settings.sync()
+    except Exception as exc:
+        # Leave the marker unwritten so a transient failure retries next load.
+        _log("could not enable column automatically: %r" % (exc,))
+        return
+
+    try:
+        os.makedirs(os.path.dirname(_COLUMN_MARKER), exist_ok=True)
+        with open(_COLUMN_MARKER, "w", encoding="utf-8") as handle:
+            handle.write(
+                "Written by show-folder-size-nautilus %s.\n"
+                "\n"
+                "Its presence means the Total Size column has already been\n"
+                "enabled once, automatically.  It will not be enabled again.\n"
+                "Delete this file to have that happen once more; untick the\n"
+                "column in Visible Columns to turn it off for good.\n"
+                % __version__)
+    except OSError as exc:
+        _log("could not write column marker: %r" % (exc,))
 
 
 # --- measurement ------------------------------------------------------------
@@ -302,33 +472,38 @@ def _measure_with_walk(path):
     """Fallback: sum regular-file sizes with os.walk + os.stat.
 
     Read-only.  Symlinked directories are not descended into
-    (followlinks=False) and symlinks to files are skipped, so nothing is
-    counted twice and link loops are impossible.  Hard-linked files are
-    counted once.  Unreadable entries are skipped rather than aborting.
+    (followlinks=False), so no directory tree is counted twice and link loops
+    are impossible.  Unreadable entries are skipped rather than aborting.
+
+    This counts what GIO counts, which took measuring rather than assuming.
+    Two differences used to make the fallback disagree with the primary about
+    the very same folder, so which number you saw depended on whether the GIO
+    call happened to fail -- much worse than either number being imperfect:
+
+      * Hard links.  This de-duplicated them by (st_dev, st_ino); GIO does
+        not.  One 1 MB file with two names in the tree measures 2 MB.
+      * Symlinks.  This skipped them; GIO adds each link's own st_size, which
+        is the length of the path it points at.  Small, but it is exactly the
+        sort of few-hundred-byte disagreement that looks like a real bug.
+
+    So: every entry that is not a directory contributes its st_size, and a
+    symlink to a directory is not a directory.  Follow the host.
     """
     total = 0
-    seen_hardlinks = set()
 
-    for dirpath, _dirnames, filenames in os.walk(path, topdown=True,
-                                                 followlinks=False):
-        for name in filenames:
+    for dirpath, dirnames, filenames in os.walk(path, topdown=True,
+                                                followlinks=False):
+        # dirnames carries symlinks-to-directories too, since followlinks
+        # only stops the descent -- it does not reclassify the entry.
+        for name in dirnames + filenames:
             try:
                 info = os.stat(os.path.join(dirpath, name),
                                follow_symlinks=False)
             except OSError:
                 continue
 
-            mode = info.st_mode
-            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-                continue
-
-            if info.st_nlink > 1:
-                identity = (info.st_dev, info.st_ino)
-                if identity in seen_hardlinks:
-                    continue
-                seen_hardlinks.add(identity)
-
-            total += info.st_size
+            if not stat.S_ISDIR(info.st_mode):
+                total += info.st_size
 
     return total
 
@@ -354,8 +529,41 @@ def directory_size(path, cancellable=None):
 # is not retried on every single redraw.
 
 
+def read_cache_file(path):
+    """(format, entries) for a cache file, whatever version wrote it.
+
+    Returns (None, empty) if it is missing, unreadable, or not a cache at all.
+
+    Deliberately does NOT insist on the current CACHE_FORMAT, which is the
+    difference between this and load_cache(): reading a file written by an
+    older version is the entire point of the upgrade path, and a loader that
+    refuses to look at one cannot offer to import it.
+    """
+    entries = OrderedDict()
+    if not path:
+        return None, entries
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return None, entries
+
+    if not isinstance(raw, dict) or "format" not in raw:
+        return None, entries
+
+    for key, value in (raw.get("entries") or {}).items():
+        try:
+            mtime_ns, num_bytes = value
+            entries[str(key)] = (int(mtime_ns), int(num_bytes))
+        except (TypeError, ValueError):
+            continue          # skip the bad row, keep the good ones
+
+    return raw.get("format"), entries
+
+
 def load_cache():
-    """Read the cache.  Any problem returns an empty cache, never raises.
+    """Read our own cache.  Any problem returns an empty cache, never raises.
 
     A corrupt or unreadable cache is not worth a broken file manager: the
     worst case of ignoring it is that sizes get measured again.
@@ -363,25 +571,67 @@ def load_cache():
     if not CACHE_PATH:
         return OrderedDict()
 
-    try:
-        with open(CACHE_PATH, "r", encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except (OSError, ValueError):
+    version, entries = read_cache_file(CACHE_PATH)
+    if version != CACHE_FORMAT:
+        if version is not None:
+            # Not a warning: an old file sitting there is the normal state
+            # right after an upgrade, and the setup window offers to import it.
+            _log("cache at %s is format %r, this version wants %d; ignoring it"
+                 % (CACHE_PATH, version, CACHE_FORMAT))
         return OrderedDict()
-
-    if not isinstance(raw, dict) or raw.get("format") != CACHE_FORMAT:
-        return OrderedDict()
-
-    entries = OrderedDict()
-    for path, value in (raw.get("entries") or {}).items():
-        try:
-            mtime_ns, num_bytes = value
-            entries[str(path)] = (int(mtime_ns), int(num_bytes))
-        except (TypeError, ValueError):
-            continue          # skip the bad row, keep the good ones
 
     _log("loaded %d cached sizes from %s" % (len(entries), CACHE_PATH))
     return entries
+
+
+def find_existing_caches():
+    """Every size cache on this machine we can find, for the upgrade flow.
+
+    Returns [(path, format, entry_count, mtime_epoch)], newest file first,
+    with the cache this version would use excluded -- it is not something to
+    offer to import into itself.
+
+    Looks in four places, because "where is the old cache" has four answers
+    and getting it wrong means telling someone their hours of indexing are
+    gone when the file is right there:
+
+      * the XDG default for this name
+      * the XDG default for the pre-0.5.0 name, nautilus-total-size
+      * cache_dir= in this version's config files
+      * cache_dir= in the pre-0.5.0 config files, for anyone who moved it
+
+    Read-only, and a location that does not exist simply does not appear.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME") or \
+        os.path.join(os.path.expanduser("~"), ".cache")
+
+    candidates = [
+        os.path.join(xdg, "show-folder-size-nautilus"),
+        os.path.join(xdg, LEGACY_CACHE_NAME),
+    ]
+    for files in (CONFIG_FILES, LEGACY_CONFIG_FILES):
+        configured = read_config_value("cache_dir", files=files)
+        if configured:
+            candidates.append(os.path.expanduser(configured))
+
+    found = []
+    seen = set()
+    for directory in candidates:
+        path = os.path.join(directory, "sizes.json")
+        if path in seen or path == CACHE_PATH:
+            continue
+        seen.add(path)
+        version, entries = read_cache_file(path)
+        if version is None:
+            continue
+        try:
+            modified = os.stat(path).st_mtime
+        except OSError:
+            modified = 0.0
+        found.append((path, version, len(entries), modified))
+
+    found.sort(key=lambda row: row[3], reverse=True)
+    return found
 
 
 def save_cache(entries):
@@ -406,7 +656,16 @@ def save_cache(entries):
         os.makedirs(CACHE_DIR, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(dir=CACHE_DIR, prefix=".sizes-",
                                          suffix=".tmp")
-        handle = os.fdopen(fd, "w", encoding="utf-8")
+        # os.fdopen() takes ownership of the descriptor only if it succeeds.
+        # If it raises (ENOMEM, a bad encoding) the fd is still open and
+        # nothing below will ever close it, so a repeatedly failing save
+        # would exhaust the process' descriptors -- inside nautilus, taking
+        # the file manager down with it.
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
         json.dump(payload, handle)
         handle.flush()
         os.fsync(handle.fileno())
@@ -446,6 +705,7 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._cache = load_cache()    # path -> (mtime_ns, bytes)
         self._jobs = {}               # path -> [FileInfo, ...]
         self._queued_at = {}          # path -> monotonic seconds
+        self._requeues = {}           # path -> times the watchdog re-queued it
         self._awaiting_reread = set()  # paths nudged but not yet re-asked for
         self._monitors = OrderedDict()  # path -> Gio.FileMonitor (LRU)
         self._watchdog_id = None
@@ -453,6 +713,7 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._dirty = False
         self._work_queue = queue.SimpleQueue()
         self._workers = []
+        _ensure_column_visible()
 
     # -- Nautilus.ColumnProvider --------------------------------------------
 
@@ -567,6 +828,20 @@ class ShowFolderSizeColumn(GObject.GObject,
         was lost rather than delayed.  Measurements here run in about a
         second, so STUCK_SECONDS is orders of magnitude clear of normal --
         this should never fire, and if it does the log says so plainly.
+
+        Re-queueing is capped at REQUEUE_LIMIT per path, because "stuck" and
+        "genuinely slower than STUCK_SECONDS" are indistinguishable from here.
+        Uncapped, a folder big enough to take a minute would be re-queued
+        every STUCK_SECONDS forever: each copy occupies one of four workers
+        measuring the very same tree, the queue grows without bound, and the
+        pool that is meant to be the safety net becomes the failure.
+
+        Dropping the job costs less than it sounds like.  The measurement that
+        was merely slow is still running, and _on_result caches its answer
+        whether anything is still waiting for it or not -- so the next time
+        Nautilus asks about that folder it gets a cache hit and the real size.
+        Until then the cell reads "Calculating...", which is exactly what it
+        was going to say anyway.
         """
         if not self._jobs:
             self._watchdog_id = None
@@ -576,19 +851,36 @@ class ShowFolderSizeColumn(GObject.GObject,
         for path, queued_at in list(self._queued_at.items()):
             if path not in self._jobs or now - queued_at < STUCK_SECONDS:
                 continue
+
+            attempts = self._requeues.get(path, 0)
+            if attempts >= REQUEUE_LIMIT:
+                _log("job for %s still outstanding after %d re-queues; "
+                     "dropping it (measurement is slow, not lost)"
+                     % (path, attempts))
+                self._forget_job(path)
+                continue
+
             _log("job for %s stuck for %.0fs; re-queueing (%d live workers)"
                  % (path, now - queued_at, len(self._workers)))
-            self._queued_at[path] = now
-            self._start_workers()
             try:
                 mtime_ns = os.lstat(path).st_mtime_ns
             except OSError:
-                self._jobs.pop(path, None)
-                self._queued_at.pop(path, None)
+                self._forget_job(path)
                 continue                      # folder went away; drop the job
+
+            self._queued_at[path] = now
+            self._requeues[path] = attempts + 1
+            self._start_workers()
             self._work_queue.put((path, mtime_ns))
 
         return GLib.SOURCE_CONTINUE
+
+    def _forget_job(self, path):
+        """Drop all bookkeeping for a job that will not be completed."""
+        self._jobs.pop(path, None)
+        self._queued_at.pop(path, None)
+        self._requeues.pop(path, None)
+        self._awaiting_reread.discard(path)
 
     def _start_workers(self):
         """Ensure WORKER_COUNT live workers, replacing any that have died.
@@ -642,6 +934,12 @@ class ShowFolderSizeColumn(GObject.GObject,
                               priority=GLib.PRIORITY_DEFAULT)
             except Exception as exc:                  # never let a worker die
                 _log("worker recovered from %r" % (exc,))
+                # Everything above is already guarded, so reaching here means
+                # the queue or idle_add itself failed.  If that is persistent,
+                # an unpaused loop spins a core at 100% inside the file
+                # manager and the only symptom is a hot laptop.  Surviving is
+                # the point; surviving quietly and cheaply is the whole point.
+                time.sleep(WORKER_BACKOFF_S)
 
     def _on_result(self, path, mtime_ns, num_bytes):
         """Main thread: cache the answer, then get Nautilus to re-read it."""
@@ -654,6 +952,10 @@ class ShowFolderSizeColumn(GObject.GObject,
 
         text = format_size(num_bytes) if num_bytes >= 0 else ""
         self._queued_at.pop(path, None)
+        self._requeues.pop(path, None)
+        # A re-queued job can land twice.  The second arrival finds no
+        # waiters, updates the cache (harmlessly, with the same answer) and
+        # nudges nobody, which is exactly what should happen.
         file_infos = self._jobs.pop(path, [])
         for file_info in file_infos:
             file_info.add_string_attribute(ATTRIBUTE, text)
@@ -726,8 +1028,19 @@ class ShowFolderSizeColumn(GObject.GObject,
         if not path:
             return
 
-        directory = os.path.dirname(path) if not os.path.isdir(path) else path
-        dropped = 0
+        # Drop the changed thing's own entry first, then walk up from its
+        # parent.  The old code decided where to start with os.path.isdir(),
+        # which is both a stat syscall per event -- and there is one event per
+        # write, so a single download can fire hundreds -- and wrong in the
+        # case that matters: a directory that has just been DELETED is no
+        # longer a directory, so isdir() says False, the walk started at its
+        # parent, and the dead directory's own cached total stayed in the
+        # cache (and got written back to disk) for good.  A path that names a
+        # file is simply not a key here, so popping it unconditionally costs
+        # nothing.
+        dropped = 1 if self._cache.pop(path, None) is not None else 0
+
+        directory = os.path.dirname(path)
         while True:
             if self._cache.pop(directory, None) is not None:
                 dropped += 1
@@ -735,6 +1048,17 @@ class ShowFolderSizeColumn(GObject.GObject,
             if parent == directory:
                 break
             directory = parent
+
+        # A watched directory that goes away keeps its GFileMonitor alive
+        # otherwise, holding an inotify watch on a dead inode and a slot
+        # against MONITOR_LIMIT that nothing will ever reclaim, since the LRU
+        # eviction only runs when a *new* watch is added.
+        if event_type in (Gio.FileMonitorEvent.DELETED,
+                          Gio.FileMonitorEvent.MOVED_OUT):
+            monitor = self._monitors.pop(path, None)
+            if monitor is not None:
+                monitor.cancel()
+                _log("stopped watching %s (it is gone)" % path)
 
         if dropped:
             self._schedule_save()
@@ -806,4 +1130,9 @@ if __name__ == "__main__":
         walk_seconds = time.monotonic() - begin
         print("  os.walk      : %-12s in %6.2fs   (%d bytes)"
               % (format_size(walk_bytes), walk_seconds, walk_bytes))
-        print("  column shows : %s" % format_size(gio_bytes or walk_bytes))
+        # Not `gio_bytes or walk_bytes`: an empty folder measures 0, which is
+        # falsy, so that reported the fallback's answer for the one case where
+        # both are certain to agree -- harmless here, but the same idiom in
+        # directory_size() would silently prefer the wrong number.
+        shown = walk_bytes if gio_bytes is None else gio_bytes
+        print("  column shows : %s" % format_size(shown))
