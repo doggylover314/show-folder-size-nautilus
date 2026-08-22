@@ -44,6 +44,12 @@ stays unticked.
 
 ### Or from the apt repository (recommended, and it keeps itself updated)
 
+> **Not published yet.** The repository goes live with the 1.0.0 release;
+> until then these commands will fail on the signing key, and the
+> [releases page](https://github.com/doggylover314/show-folder-size-nautilus/releases)
+> is the way in. Building it yourself from a clone works today:
+> `./build-apt-repo.sh --key <YOURKEY>`.
+
 Add it once and this upgrades with the rest of your system:
 
 ```bash
