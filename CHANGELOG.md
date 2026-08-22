@@ -45,6 +45,24 @@ different ways this project measures a folder finally agree on the answer.
   the metainfo said 0.6.0 regardless, so GNOME Software showed the wrong
   version and nothing caught it.
 
+- **The cache is sharded across up to 100 files.** Measuring a few folders
+  used to rewrite the entire cache: at a 1,000,000-entry limit that is 158 MB
+  of disk traffic, and real SSD wear, to record a handful of numbers. Now only
+  the shards that changed are rewritten, measured at 1.1% of the bytes for a
+  one-entry change. A shard is created only once something belongs in it, so a
+  small cache stays a few small files.
+
+  Shards are keyed on a directory's **parent**, not on its own path. That is
+  the part that makes it work: changes cluster by location, because you open a
+  folder and its children get measured together, so keying on the parent puts
+  all of them in one file. Hashing the full path would spread siblings evenly
+  over all 100 shards and rewrite nearly everything anyway. The hash is
+  `zlib.crc32` rather than `hash()`, which is salted per process and would put
+  an entry in a different shard on every restart.
+
+  One cost, recorded rather than left to be discovered: entries load grouped by
+  shard, so the LRU order that eviction uses is arbitrary after a restart.
+  Eviction at a million entries is rare and the indexer caps by size anyway.
 - **A signed apt repository**, built by `build-apt-repo.sh`. This is the
   update mechanism, and it is deliberately not an updater inside the project:
   one of those would have needed network access from our own code and a

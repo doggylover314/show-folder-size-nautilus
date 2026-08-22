@@ -159,7 +159,7 @@ all of it safe to delete:
 
 | Written | When | Prevent it by |
 |---|---|---|
-| `~/.cache/show-folder-size-nautilus/sizes.json` | after each measurement, batched | setting the cache directory empty |
+| `~/.cache/show-folder-size-nautilus/sizes-NN.json` | after each measurement, batched | setting the cache directory empty |
 | `~/.cache/show-folder-size-nautilus/index.lock` | while indexing (zero bytes) | not indexing, or no cache directory |
 | `~/.config/show-folder-size-nautilus-column-added` | once, ever | creating the file yourself first |
 | the dconf key `org.gnome.nautilus.list-view default-visible-columns` | once, ever, alongside the marker above | the same marker file |
@@ -167,9 +167,14 @@ all of it safe to delete:
 | `~/.config/autostart/…ShowFolderSizeIndex.desktop` | only when you change the login setting | not changing it |
 | `~/.config/environment.d/60-show-folder-size-nautilus.conf` | only if you switch on the session-environment option | leaving it off, which is the default |
 
-The cache is written atomically (temp file + `os.replace`), so a crash cannot
-corrupt it, and it holds directory paths, mtimes and byte counts, nothing
-else. Note that emptying the cache directory disables the **cache** only; the
+The cache is split across up to 100 shard files, each written atomically (temp
+file + `os.replace`) so a crash cannot corrupt one, and each holding directory
+paths, mtimes and byte counts, nothing else. Shards exist so that measuring a
+few folders rewrites one small file rather than the whole cache, which at the
+1,000,000-entry default would be 158 MB of pointless disk traffic, and real
+SSD wear, every time.
+A folder's contents are keyed to one shard, so browsing one directory dirties
+one file. A shard is only created once something belongs in it. Note that emptying the cache directory disables the **cache** only; the
 one-off column write is governed by its marker file, not by that setting. Do
 both and the extension touches nothing.
 
@@ -230,7 +235,7 @@ without the flag still measures everything.
 
 Ctrl-C saves what it has already measured rather than discarding the work. The
 cache is capped (`--max-entries`, or `max_entries=` in the config file,
-default 100000) keeping the **largest**
+default 1000000) keeping the **largest**
 directories, since those are the ones worth not measuring again. Only one
 indexer runs at a time, enforced with a lock file.
 

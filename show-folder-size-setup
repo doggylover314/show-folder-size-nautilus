@@ -440,11 +440,12 @@ class SetupWindow(Adw.ApplicationWindow):
 
         self._import_entry = Gtk.Entry(
             hexpand=True, valign=Gtk.Align.CENTER,
-            placeholder_text="/path/to/sizes.json")
+            placeholder_text="a cache folder, or an old sizes.json")
         manual_row = Adw.ActionRow(
-            title="Or a file you point at",
+            title="Or a location you point at",
             subtitle="Used instead of the list above whenever this is filled "
-                     "in, for a cache kept somewhere unusual")
+                     "in, for a cache kept somewhere unusual. Either a cache "
+                     "folder or a single sizes.json from an older version.")
         manual_row.add_suffix(self._import_entry)
         group.add(manual_row)
 
@@ -540,11 +541,14 @@ class SetupWindow(Adw.ApplicationWindow):
                       "to import into. Turn it on and save first.")
             return
         if os.path.abspath(source) == os.path.abspath(
-                self._extension.CACHE_PATH):
+                self._extension.CACHE_DIR):
             self._say("That is the cache this version already uses.")
             return
 
-        version, entries = self._extension.read_cache_file(source)
+        # read_cache_any, not read_cache_file: `source` can be a single
+        # sizes.json from an older version or a directory of shards from this
+        # one, and the person importing should not need to know which.
+        version, entries = self._extension.read_cache_any(source)
         if version is None:
             self._say("%s is not a size cache, or cannot be read." % source)
             return
@@ -568,7 +572,7 @@ class SetupWindow(Adw.ApplicationWindow):
                                 reverse=True)[:limit])
 
         if not self._extension.save_cache(cache):
-            self._say("Could not write %s." % self._extension.CACHE_PATH)
+            self._say("Could not write the cache in %s." % self._extension.CACHE_DIR)
             return
 
         message = ["Imported %d folders from %s." % (len(entries), source)]

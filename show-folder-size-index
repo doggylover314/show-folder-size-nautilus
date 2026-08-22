@@ -21,10 +21,11 @@ index.  Or:
 
 SAFETY / AUDIT NOTES
 --------------------
-  * Reads with os.scandir() and os.lstat().  Writes exactly one file: the same
-    size cache the extension uses (~/.cache/show-folder-size-nautilus/sizes.json
-    by default), written atomically by the extension's own save function, plus
-    a zero-length lock file beside it (see --autostart).  --dry-run writes
+  * Reads with os.scandir() and os.lstat().  Writes only the size cache the
+    extension uses, in ~/.cache/show-folder-size-nautilus by default: a set of
+    sizes-NN.json shards, each written atomically by the extension's own save
+    function, plus a zero-length lock file beside them (see --autostart).
+    Nothing else on disk is created, changed or removed, and --dry-run writes
     nothing at all.
   * No network, no subprocesses, nothing removed or modified on disk.
   * Symlinks are never followed, so there are no loops and no tree is counted
@@ -465,11 +466,11 @@ def _run_autostart(args):
 
         if _extension.save_cache(cache):
             report("wrote %d entries to %s in %.1fs total"
-                   % (len(cache), _extension.CACHE_PATH,
+                   % (len(cache), _extension.CACHE_DIR,
                       time.monotonic() - started))
             return 0
 
-        report("could not write %s" % _extension.CACHE_PATH)
+        report("could not write the cache in %s" % _extension.CACHE_DIR)
         return 1
     finally:
         if lock_fd is not None:
@@ -607,7 +608,7 @@ def main(argv=None):
     try:
         # Merge into whatever is already cached rather than replacing it.
         cache = _extension.load_cache() if not args.dry_run else {}
-        print("Cache: %s" % (_extension.CACHE_PATH or "(disabled, dry run)"))
+        print("Cache: %s" % (_extension.CACHE_DIR or "(disabled, dry run)"))
         print("Starting with %d cached directories.\n" % len(cache))
 
         # A manual run measures everything unless asked not to.  Refresh is
@@ -656,7 +657,7 @@ def main(argv=None):
 
         if _extension.save_cache(cache):
             print("Wrote %d entries to %s"
-                  % (len(cache), _extension.CACHE_PATH))
+                  % (len(cache), _extension.CACHE_DIR))
             print("\nRestart nautilus (nautilus -q) to pick up the new cache.")
             return 0
 

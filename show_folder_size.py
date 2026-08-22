@@ -216,6 +216,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 from collections import OrderedDict
 
 import gi
@@ -346,7 +347,46 @@ def _configured_cache_dir():
 
 
 CACHE_DIR = _configured_cache_dir()
+
+# The cache is SHARDED across this many files, sizes-00.json to sizes-99.json,
+# so that saving a handful of new measurements rewrites one small file instead
+# of the whole cache.  At CACHE_LIMIT the single-file version rewrote 158 MB
+# every time a few folders were measured, which is pointless disk traffic and
+# real wear on an SSD.
+#
+# A shard file is only created once something hashes into it, so a small cache
+# is a few small files rather than a hundred near-empty ones.
+SHARD_COUNT = 100
+SHARD_TEMPLATE = "sizes-%02d.json"
+
+# The pre-shard single file.  Still read, so upgrading does not lose the cache,
+# and still what CACHE_PATH points at, because "is caching switched on" is
+# checked against it all over this project.
 CACHE_PATH = os.path.join(CACHE_DIR, "sizes.json") if CACHE_DIR else ""
+
+
+def shard_for(path):
+    """Which shard a directory's entry belongs in.
+
+    Keyed on the PARENT directory rather than on the path itself, and that is
+    the whole point rather than an implementation detail.  Changes cluster by
+    location -- you open a folder and its children get measured together -- so
+    keying on the parent puts all of those in one shard and a save rewrites
+    one file.  Hashing the full path would spread siblings evenly over all 100
+    shards, so measuring one folder would dirty most of them and rewrite very
+    nearly everything, which is the cost this exists to avoid.
+
+    zlib.crc32 rather than hash(): hash() of a str is salted per process, so
+    the shard a path belongs to would change every time nautilus restarted and
+    every entry would be written to one file and then looked for in another.
+    crc32 is stable, fast, and its distribution is fine for buckets.
+    """
+    parent = os.path.dirname(path) or path
+    return zlib.crc32(parent.encode("utf-8", "surrogateescape")) % SHARD_COUNT
+
+
+def shard_path(index):
+    return os.path.join(CACHE_DIR, SHARD_TEMPLATE % index) if CACHE_DIR else ""
 # Bumped to 2 in v1.0.0.  The on-disk shape did not change; what a byte count
 # MEANS did.  A cache written before then may hold totals that de-duplicated
 # hard links and ignored symlink sizes, and nothing would ever correct them --
@@ -589,25 +629,69 @@ def read_cache_file(path):
     return raw.get("format"), entries
 
 
+def read_cache_any(path):
+    """(format, entries) from a cache file, or from a directory of shards.
+
+    Lets the upgrade path take whatever the user points at without them
+    having to know that this version keeps a hundred files where older ones
+    kept a single sizes.json.
+    """
+    if not path or not os.path.isdir(path):
+        return read_cache_file(path)
+
+    merged = OrderedDict()
+    version = None
+    names = ["sizes.json"] + [SHARD_TEMPLATE % i for i in range(SHARD_COUNT)]
+    for name in names:
+        found_version, found = read_cache_file(os.path.join(path, name))
+        if found_version is None:
+            continue
+        if version is None:
+            version = found_version
+        merged.update(found)
+    return version, merged
+
+
 def load_cache():
-    """Read our own cache.  Any problem returns an empty cache, never raises.
+    """Merge every shard.  Any problem returns an empty cache, never raises.
 
     A corrupt or unreadable cache is not worth a broken file manager: the
-    worst case of ignoring it is that sizes get measured again.
+    worst case of ignoring it is that sizes get measured again.  That applies
+    per shard, so one damaged file costs a hundredth of the cache rather than
+    all of it, which is a quiet second benefit of splitting it up.
+
+    The pre-shard single file is read first, so that a sharded value wins over
+    a stale copy of the same path still sitting in it.
+
+    One thing sharding costs, recorded rather than discovered later: entries
+    come back grouped by shard, not in the order they were last used, so the
+    LRU order that CACHE_LIMIT evicts by is arbitrary after a restart.  It is
+    a small loss -- eviction at a limit of a million entries is rare, and the
+    indexer caps by size rather than recency anyway -- and the alternative is
+    storing a sequence number on every entry to rebuild an order that is only
+    consulted when the cache is full.
     """
-    if not CACHE_PATH:
+    if not CACHE_DIR:
         return OrderedDict()
 
-    version, entries = read_cache_file(CACHE_PATH)
-    if version != CACHE_FORMAT:
-        if version is not None:
+    entries = OrderedDict()
+    files = 0
+    for candidate in [CACHE_PATH] + [shard_path(i) for i in range(SHARD_COUNT)]:
+        version, found = read_cache_file(candidate)
+        if version is None:
+            continue
+        if version != CACHE_FORMAT:
             # Not a warning: an old file sitting there is the normal state
             # right after an upgrade, and the setup window offers to import it.
-            _log("cache at %s is format %r, this version wants %d; ignoring it"
-                 % (CACHE_PATH, version, CACHE_FORMAT))
-        return OrderedDict()
+            _log("%s is format %r, this version wants %d; ignoring it"
+                 % (candidate, version, CACHE_FORMAT))
+            continue
+        entries.update(found)
+        files += 1
 
-    _log("loaded %d cached sizes from %s" % (len(entries), CACHE_PATH))
+    if files:
+        _log("loaded %d cached sizes from %d file(s) in %s"
+             % (len(entries), files, CACHE_DIR))
     return entries
 
 
@@ -641,46 +725,45 @@ def find_existing_caches():
         if configured:
             candidates.append(os.path.expanduser(configured))
 
+    ours = os.path.abspath(CACHE_DIR) if CACHE_DIR else None
+
     found = []
     seen = set()
     for directory in candidates:
-        path = os.path.join(directory, "sizes.json")
-        if path in seen or path == CACHE_PATH:
+        directory = os.path.abspath(directory)
+        if directory in seen or directory == ours:
             continue
-        seen.add(path)
-        version, entries = read_cache_file(path)
-        if version is None:
+        seen.add(directory)
+
+        # The whole directory, not just sizes.json: older versions kept one
+        # file, this one keeps a hundred, and someone importing should not
+        # have to know which layout they are pointing at.
+        version, entries = read_cache_any(directory)
+        if version is None or not entries:
             continue
+
+        modified = 0.0
         try:
-            modified = os.stat(path).st_mtime
+            for name in os.listdir(directory):
+                if name.startswith("sizes") and name.endswith(".json"):
+                    modified = max(
+                        modified,
+                        os.stat(os.path.join(directory, name)).st_mtime)
         except OSError:
-            modified = 0.0
-        found.append((path, version, len(entries), modified))
+            pass
+        found.append((directory, version, len(entries), modified))
 
     found.sort(key=lambda row: row[3], reverse=True)
     return found
 
 
-def save_cache(entries):
-    """Write the cache atomically.  Never raises.
+def _write_json_atomic(path, payload):
+    """Write one JSON file atomically.  Never raises; returns success.
 
     Atomic because the alternative is a truncated JSON file if nautilus dies
     mid-write, which would silently poison every future start: write a
     temporary file in the same directory, then os.replace() onto the target.
     """
-    if not CACHE_PATH:
-        return False
-
-    # Accepts a mapping or an already-flattened sequence of (path, (mtime,
-    # bytes)) pairs.  The extension passes the latter, snapshotted on a worker
-    # thread; the indexer and the setup window pass dicts.
-    pairs = entries.items() if hasattr(entries, "items") else entries
-
-    payload = {
-        "format": CACHE_FORMAT,
-        "entries": {path: [mtime, size] for path, (mtime, size) in pairs},
-    }
-
     handle = None
     temp_path = None
     try:
@@ -702,13 +785,11 @@ def save_cache(entries):
         os.fsync(handle.fileno())
         handle.close()
         handle = None
-        os.replace(temp_path, CACHE_PATH)
+        os.replace(temp_path, path)
         temp_path = None
-        _log("saved %d cached sizes to %s"
-             % (len(payload["entries"]), CACHE_PATH))
         return True
     except Exception as exc:
-        _log("could not save cache: %r" % (exc,))
+        _log("could not write %s: %r" % (path, exc))
         return False
     finally:
         if handle is not None:
@@ -721,6 +802,70 @@ def save_cache(entries):
                 os.unlink(temp_path)      # only ever our own temp file
             except OSError:
                 pass
+
+
+def save_cache(entries, shards=None):
+    """Write the cache.  Never raises.
+
+    `shards` limits the write to those shard numbers, which is the point of
+    sharding: the extension knows which shards its new measurements landed in
+    and rewrites only those, turning a 158 MB write into a 1.6 MB one.  Pass
+    None to write everything, which is what a full re-index wants.
+    """
+    if not CACHE_DIR:
+        return False
+
+    # Accepts a mapping or an already-flattened sequence of (path, (mtime,
+    # bytes)) pairs.  The extension passes the latter, snapshotted on a worker
+    # thread; the indexer and the setup window pass dicts.
+    pairs = entries.items() if hasattr(entries, "items") else entries
+    wanted = None if shards is None else set(shards)
+
+    buckets = {}
+    for path, (mtime, size) in pairs:
+        index = shard_for(path)
+        if wanted is not None and index not in wanted:
+            continue
+        buckets.setdefault(index, {})[path] = [mtime, size]
+
+    succeeded = True
+    written = 0
+    for index in (range(SHARD_COUNT) if wanted is None else sorted(wanted)):
+        target = shard_path(index)
+        bucket = buckets.get(index)
+
+        if not bucket:
+            # Everything that lived here is gone: evicted by CACHE_LIMIT, or
+            # the directories were deleted.  The file has to go too, or the
+            # next load merges those entries straight back in and they become
+            # immortal.  Only ever one of our own shard files.
+            if os.path.exists(target):
+                try:
+                    os.unlink(target)
+                except OSError as exc:
+                    _log("could not remove empty shard %s: %r" % (target, exc))
+            continue
+
+        if _write_json_atomic(target,
+                              {"format": CACHE_FORMAT, "entries": bucket}):
+            written += 1
+        else:
+            succeeded = False
+
+    # Once the shards hold everything, the pre-shard file is a stale duplicate
+    # that load_cache would otherwise keep merging in for ever.  Only removed
+    # after a complete, successful write, and it is our own file in our own
+    # cache directory.
+    if succeeded and wanted is None and CACHE_PATH and os.path.exists(CACHE_PATH):
+        try:
+            os.unlink(CACHE_PATH)
+            _log("migrated to shards; removed %s" % CACHE_PATH)
+        except OSError as exc:
+            _log("could not remove %s: %r" % (CACHE_PATH, exc))
+
+    _log("saved %d entries across %d shard(s)"
+         % (sum(len(b) for b in buckets.values()), written))
+    return succeeded
 
 
 # --- the extension ----------------------------------------------------------
@@ -750,6 +895,9 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._watchdog_id = None
         self._save_id = None
         self._dirty = False
+        # Which shards have changed since the last write.  Rewriting only
+        # these is the entire reason the cache is split into files.
+        self._dirty_shards = set()
         self._work_queue = queue.SimpleQueue()
         self._workers = []
         _ensure_column_visible()
@@ -777,7 +925,8 @@ class ShowFolderSizeColumn(GObject.GObject,
         entries.update(self._cache)
         self._cache = entries
         while len(self._cache) > CACHE_LIMIT:
-            self._cache.popitem(last=False)
+            evicted, _value = self._cache.popitem(last=False)
+            self._dirty_shards.add(shard_for(evicted))
         self._cache_loaded = True
         _log("cache ready: %d entries" % len(self._cache))
 
@@ -1018,8 +1167,12 @@ class ShowFolderSizeColumn(GObject.GObject,
         """Main thread: cache the answer, then get Nautilus to re-read it."""
         self._cache[path] = (mtime_ns, num_bytes)
         self._cache.move_to_end(path)
+        self._dirty_shards.add(shard_for(path))
         while len(self._cache) > CACHE_LIMIT:
-            self._cache.popitem(last=False)
+            evicted, _value = self._cache.popitem(last=False)
+            # The evicted entry is still in its shard file, so that shard has
+            # to be rewritten or the next load brings it straight back.
+            self._dirty_shards.add(shard_for(evicted))
         self._schedule_save()
         self._watch(path)
 
@@ -1059,11 +1212,24 @@ class ShowFolderSizeColumn(GObject.GObject,
         if not self._dirty:
             return GLib.SOURCE_REMOVE
         self._dirty = False
-        threading.Thread(target=self._save_worker,
+
+        # Take the dirty set now and hand it over.  Anything measured from
+        # here on marks its shard again and gets written by the next save.
+        shards = self._dirty_shards
+        self._dirty_shards = set()
+
+        # One exception to writing only what changed: while the pre-shard
+        # sizes.json is still on disk, write everything, because that is what
+        # lets save_cache retire it. It happens once, on the first save after
+        # upgrading.
+        if CACHE_PATH and os.path.exists(CACHE_PATH):
+            shards = None
+
+        threading.Thread(target=self._save_worker, args=(shards,),
                          name="show-folder-size-save", daemon=True).start()
         return GLib.SOURCE_REMOVE
 
-    def _save_worker(self):
+    def _save_worker(self, shards):
         """Snapshot and write, both off the main thread.
 
         The snapshot used to be taken here on the MAIN thread, as
@@ -1084,9 +1250,24 @@ class ShowFolderSizeColumn(GObject.GObject,
         fails its mtime check and gets measured again.
         """
         try:
-            save_cache(list(self._cache.items()))
+            if save_cache(list(self._cache.items()), shards=shards):
+                return
+            failed = shards
         except Exception as exc:
             _log("save failed: %r" % (exc,))
+            failed = shards
+
+        # A shard that failed to write is still stale on disk, and its dirty
+        # mark has already been taken. Put it back, or the entry sits
+        # unwritten until something unrelated happens to touch that shard.
+        if failed:
+            GLib.idle_add(self._requeue_shards, failed,
+                          priority=GLib.PRIORITY_DEFAULT)
+
+    def _requeue_shards(self, shards):
+        self._dirty_shards.update(shards)
+        self._schedule_save()
+        return GLib.SOURCE_REMOVE
 
     # -- filesystem monitoring -----------------------------------------------
 
@@ -1136,12 +1317,16 @@ class ShowFolderSizeColumn(GObject.GObject,
         # cache (and got written back to disk) for good.  A path that names a
         # file is simply not a key here, so popping it unconditionally costs
         # nothing.
-        dropped = 1 if self._cache.pop(path, None) is not None else 0
+        dropped = 0
+        if self._cache.pop(path, None) is not None:
+            dropped += 1
+            self._dirty_shards.add(shard_for(path))
 
         directory = os.path.dirname(path)
         while True:
             if self._cache.pop(directory, None) is not None:
                 dropped += 1
+                self._dirty_shards.add(shard_for(directory))
             parent = os.path.dirname(directory)
             if parent == directory:
                 break
