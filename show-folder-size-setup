@@ -1,0 +1,948 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+show-folder-size-setup -- configure the Total Size column, with a window.
+
+WHY THIS EXISTS
+---------------
+The .deb asks where to keep the size cache using debconf.  That question is
+only ever seen by people who install from a terminal.  Installing by
+double-clicking the .deb hands the job to GNOME Software, which drives dpkg
+through PackageKit with a non-interactive debconf frontend: every question is
+silently answered with its default and the user is never shown anything.
+
+Worse, a package's postinst runs as root.  The cache lives under each user's
+home directory, so "index my drives during install" cannot work there either
+-- it would fill root's cache with sizes nobody reads.
+
+So the configuration that has to happen *as you, in your session* lives here
+instead: cache location, whether the column is shown, and pre-indexing your
+drives.  The debconf question remains for terminal installs, where it sets
+the system-wide default in /etc/show-folder-size-nautilus.conf.
+
+WHAT IT WRITES
+--------------
+  * ~/.config/show-folder-size-nautilus.conf         (cache location, autostart)
+  * ~/.config/show-folder-size-nautilus-column-added (marker; see below)
+  * ~/.config/autostart/…ShowFolderSizeIndex.desktop (only if you change the
+    login setting; see AUTOSTART below)
+  * the size cache itself, if you index drives
+  * the dconf key org.gnome.nautilus.list-view default-visible-columns
+
+Nothing else, and nothing outside your home directory.
+
+AUTOSTART
+---------
+The .deb installs the login entry system-wide, in /etc/xdg/autostart, so it
+applies to every account on the machine.  A normal user cannot edit or delete
+a file there, and should not have to: the XDG autostart spec says a file of
+the same name in ~/.config/autostart REPLACES the system one for that user.
+So switching the login run off writes that name with Hidden=true, which the
+spec defines as "do not start this", and switching it back on deletes the
+override again so the package's own entry applies -- and stays current if the
+package updates it.
+
+Running from a clone there is no system entry to replace, so switching it on
+writes a complete .desktop instead.  Same file either way, so the off switch
+does not need to know which case it is in.
+
+WIDGET CHOICE
+-------------
+Deliberately built from Adw.ActionRow plus plain Gtk widgets rather than
+Adw.SwitchRow / Adw.EntryRow / Adw.ToolbarView.  Those arrived in libadwaita
+1.4, and this package declares nautilus (>= 43), which on GNOME 43 means
+libadwaita 1.2.  The older widgets exist everywhere in 1.x.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import sys
+import threading
+import time
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "io.github.doggylover314.ShowFolderSizeSetup"
+
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config",
+                           "show-folder-size-nautilus.conf")
+
+# The per-user autostart entry.  Hidden= is the switch: the XDG autostart spec
+# defines Hidden=true as "pretend this file does not exist", which is exactly
+# what an override of a system-wide entry needs to say.  NoDisplay keeps it out
+# of the applications menu -- it is not something you launch, and an entry that
+# looks launchable but exits after indexing is a support question waiting to
+# happen.
+AUTOSTART_DESKTOP = """[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Folder Size Indexing
+Comment=Keep folder sizes for the Total Size column up to date
+Exec=%(exec)s
+Terminal=false
+NoDisplay=true
+Hidden=%(hidden)s
+X-GNOME-Autostart-enabled=true
+"""
+
+# Where to look for the extension and the indexer, in the order the indexer
+# itself uses.  Running from a clone must keep working.
+_SEARCH_PATHS = [
+    os.path.dirname(os.path.abspath(__file__)),
+    os.path.expanduser("~/.local/share/nautilus-python/extensions"),
+    "/usr/share/nautilus-python/extensions",
+    "/usr/bin",
+]
+
+
+def _load(module_name, filename):
+    """Import a file by path.  The indexer has no .py suffix, so plain import
+    will not find it; this is the supported way to load such a file."""
+    for directory in _SEARCH_PATHS:
+        candidate = os.path.join(directory, filename)
+        if not os.path.exists(candidate):
+            continue
+        if directory not in sys.path:
+            sys.path.insert(0, directory)
+        spec = importlib.util.spec_from_loader(
+            module_name,
+            importlib.machinery.SourceFileLoader(module_name, candidate))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    return None
+
+
+class Cancelled(Exception):
+    """Raised out of the progress callback to stop a walk in progress."""
+
+
+# The characters the Desktop Entry spec calls reserved in an Exec value, and
+# the ones that additionally need a backslash once inside the quotes.
+_EXEC_RESERVED = " \t\n\"'\\><~|&;$*?#()`"
+_EXEC_ESCAPE = ("\\", "\"", "`", "$")
+
+
+def desktop_exec_quote(word):
+    """Quote one Exec argument the way the Desktop Entry spec requires.
+
+    NOT GLib.shell_quote(), which is the obvious call and the wrong one: it
+    quotes for a shell, so it produces 'single quotes', and the spec is
+    explicit that quoting in Exec is done with double quotes.  Several
+    implementations parse Exec with g_shell_parse_argv and would accept it
+    anyway, which is exactly what makes it worth getting right -- it works
+    everywhere you test it and fails on the desktop you do not have.
+
+    The realistic case is a path with a space in it, from running out of a
+    clone in a directory like "My Projects".
+    """
+    if not any(character in word for character in _EXEC_RESERVED):
+        return word
+    for character in _EXEC_ESCAPE:      # backslash first, or it doubles twice
+        word = word.replace(character, "\\" + character)
+    return '"%s"' % word
+
+
+def read_user_config():
+    """The user's own config as {key: value}.  Missing file gives {}.
+
+    Only ~/.config/…conf, never /etc: this is the file the window owns and
+    rewrites, and rewriting the system one is not this program's business.
+    """
+    values = {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return values
+
+
+def write_user_config(updates):
+    """Merge `updates` into the user config and write the whole file back.
+
+    Read-modify-write rather than truncate-and-write.  The window writes two
+    unrelated settings into one file, and the previous version rewrote it from
+    scratch with just cache_dir in it -- so saving a cache location silently
+    deleted the autostart directories, and saving those would have deleted the
+    cache location right back.  Whichever you touched last won.
+
+    Raises OSError, which the caller reports; a settings window that says
+    "Saved" when it did not is worse than one that says why not.
+    """
+    values = read_user_config()
+    values.update(updates)
+
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
+        handle.write(
+            "# Written by show-folder-size-setup. Edit freely.\n"
+            "# cache_dir      : where measured sizes are kept.\n"
+            "#                  An empty value disables on-disk caching.\n"
+            "# autostart_dirs : what the login run indexes, colon-separated\n"
+            "#                  like PATH. Absent means your home folder.\n"
+            "# This file overrides the system default in\n"
+            "# /etc/show-folder-size-nautilus.conf\n")
+        for key in sorted(values):
+            handle.write("%s=%s\n" % (key, values[key]))
+
+
+class SetupWindow(Adw.ApplicationWindow):
+
+    def __init__(self, application, extension, indexer):
+        super().__init__(application=application, title="Folder Size Setup")
+        self.set_default_size(620, 700)
+
+        self._extension = extension
+        self._indexer = indexer
+        self._worker = None
+        self._stop = threading.Event()
+        self._drive_checks = []
+
+        page = Adw.PreferencesPage()
+        page.set_vexpand(True)
+        page.add(self._build_column_group())
+        page.add(self._build_cache_group())
+        page.add(self._build_import_group())
+        page.add(self._build_index_group())
+        # After the index group, because its button reads the tick boxes that
+        # group creates.
+        page.add(self._build_autostart_group())
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(Adw.HeaderBar())
+        box.append(page)
+        self.set_content(box)
+
+    # -- column --------------------------------------------------------------
+
+    def _build_column_group(self):
+        group = Adw.PreferencesGroup(
+            title="Column",
+            description="The Total Size column appears in List View only; "
+                        "grid view has no columns.")
+
+        self._column_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._column_switch.set_active(self._column_is_visible())
+        self._column_switch.connect("notify::active", self._on_column_toggled)
+
+        row = Adw.ActionRow(
+            title="Show the Total Size column",
+            subtitle="Adds it to Visible Columns for your account")
+        row.add_suffix(self._column_switch)
+        row.set_activatable_widget(self._column_switch)
+        group.add(row)
+        return group
+
+    def _list_settings(self):
+        """The Nautilus list-view GSettings, or None if Files isn't installed."""
+        source = Gio.SettingsSchemaSource.get_default()
+        if source is None or source.lookup(
+                self._extension.NAUTILUS_LIST_SCHEMA, True) is None:
+            return None
+        return Gio.Settings.new(self._extension.NAUTILUS_LIST_SCHEMA)
+
+    def _column_is_visible(self):
+        settings = self._list_settings()
+        if settings is None:
+            return False
+        key = self._extension.VISIBLE_COLUMNS_KEY
+        return self._extension.COLUMN_ID in settings.get_strv(key)
+
+    def _on_column_toggled(self, switch, _param):
+        settings = self._list_settings()
+        if settings is None:
+            self._say("GNOME Files settings not found -- is nautilus installed?")
+            return
+
+        column_id = self._extension.COLUMN_ID
+        wanted = switch.get_active()
+
+        for key in (self._extension.VISIBLE_COLUMNS_KEY,
+                    self._extension.COLUMN_ORDER_KEY):
+            columns = list(settings.get_strv(key))
+            if wanted and column_id not in columns:
+                settings.set_strv(key, columns + [column_id])
+            elif not wanted and column_id in columns:
+                # Only drop it from the visible list.  Leaving it in the order
+                # list means re-enabling later puts it back where it was.
+                if key == self._extension.VISIBLE_COLUMNS_KEY:
+                    settings.set_strv(
+                        key, [c for c in columns if c != column_id])
+        Gio.Settings.sync()
+
+        # Record that the choice was made deliberately, so the extension's
+        # own first-run enable does not override it on the next start.
+        self._write_column_marker()
+        self._say("Column %s. Run 'nautilus -q' for it to take effect."
+                  % ("enabled" if wanted else "disabled"))
+
+    def _write_column_marker(self):
+        try:
+            os.makedirs(os.path.dirname(self._extension._COLUMN_MARKER),
+                        exist_ok=True)
+            with open(self._extension._COLUMN_MARKER, "w",
+                      encoding="utf-8") as handle:
+                handle.write("Written by show-folder-size-setup.\n"
+                             "The column state was chosen deliberately; the\n"
+                             "extension will not change it automatically.\n")
+        except OSError as error:
+            self._say("Could not record the column choice: %s" % error)
+
+    # -- cache ---------------------------------------------------------------
+
+    def _build_cache_group(self):
+        group = Adw.PreferencesGroup(
+            title="Cache",
+            description="Measured sizes are remembered here so revisiting a "
+                        "folder is instant. Turning this off keeps sizes only "
+                        "until nautilus restarts, and writes nothing to disk.")
+
+        current = self._extension.CACHE_DIR
+
+        self._cache_entry = Gtk.Entry(
+            hexpand=True, valign=Gtk.Align.CENTER,
+            placeholder_text=os.path.join(
+                os.path.expanduser("~"), ".cache", "show-folder-size-nautilus"))
+        self._cache_entry.set_text(current or "")
+        self._cache_entry.set_sensitive(bool(current))
+
+        self._cache_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._cache_switch.set_active(bool(current))
+        self._cache_switch.connect(
+            "notify::active",
+            lambda sw, _p: self._cache_entry.set_sensitive(sw.get_active()))
+
+        enable_row = Adw.ActionRow(title="Store sizes on disk")
+        enable_row.add_suffix(self._cache_switch)
+        enable_row.set_activatable_widget(self._cache_switch)
+        group.add(enable_row)
+
+        path_row = Adw.ActionRow(title="Location")
+        path_row.add_suffix(self._cache_entry)
+        group.add(path_row)
+
+        self._env_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._env_switch.set_active(
+            os.path.exists(self._extension.ENVIRONMENT_D_PATH))
+        self._env_switch.connect("notify::active", self._on_env_toggled)
+
+        env_row = Adw.ActionRow(
+            title="Also set %s in the session" % self._extension.CACHE_ENV_VAR,
+            subtitle="Writes ~/.config/environment.d/. Takes effect at your "
+                     "next login, and then OVERRIDES the location above.")
+        env_row.add_suffix(self._env_switch)
+        env_row.set_activatable_widget(self._env_switch)
+        group.add(env_row)
+
+        save = Gtk.Button(label="Save cache location", halign=Gtk.Align.END,
+                          margin_top=6)
+        save.add_css_class("suggested-action")
+        save.connect("clicked", self._on_save_cache)
+        row = Adw.ActionRow()
+        row.add_suffix(save)
+        group.add(row)
+        return group
+
+    def _on_env_toggled(self, switch, _param):
+        """Export the cache location into the systemd user environment.
+
+        Worth being blunt about why this is offered at all, since this project
+        already concluded that environment variables are the unreliable way to
+        talk to nautilus.  That conclusion is about variables set in a SHELL:
+        nautilus is D-Bus activated, so it never sees them.  A file in
+        environment.d is different -- the systemd user manager reads it at
+        login and applies it to everything it starts, D-Bus activated services
+        included -- and it is the only mechanism that reaches nautilus, a
+        terminal and the login indexer with one setting.
+
+        The cost is that it sits ABOVE the config file in precedence, so a
+        stale one silently wins over the location chosen in this window.  That
+        is why it is off by default, and why turning it off deletes the file
+        rather than blanking it.
+        """
+        path = self._extension.ENVIRONMENT_D_PATH
+        try:
+            if not switch.get_active():
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                self._say("Removed %s. The cache location in this window "
+                          "applies again after your next login." % path)
+                return
+
+            value = self._cache_entry.get_text().strip() \
+                if self._cache_switch.get_active() else ""
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "# Written by show-folder-size-setup.\n"
+                    "# Read by the systemd user manager at login, so it also\n"
+                    "# reaches nautilus, which is D-Bus activated.\n"
+                    "# While this file exists it OVERRIDES cache_dir in\n"
+                    "# ~/.config/show-folder-size-nautilus.conf.\n"
+                    "%s=%s\n" % (self._extension.CACHE_ENV_VAR, value))
+        except OSError as error:
+            self._say("Could not update %s: %s" % (path, error))
+            return
+
+        self._say("Wrote %s. It applies at your next login, and from then on "
+                  "it overrides the location set above." % path)
+
+    def _on_save_cache(self, _button):
+        value = self._cache_entry.get_text().strip() \
+            if self._cache_switch.get_active() else ""
+        try:
+            write_user_config({"cache_dir": value})
+        except OSError as error:
+            self._say("Could not write %s: %s" % (CONFIG_PATH, error))
+            return
+
+        # Point the already-imported extension module at the new location so
+        # indexing below writes where the user just asked, without a restart.
+        self._extension.CACHE_DIR = os.path.expanduser(value)
+        self._extension.CACHE_PATH = (
+            os.path.join(self._extension.CACHE_DIR, "sizes.json")
+            if value else "")
+
+        self._say("Saved. Cache: %s" % (value or "disabled"))
+
+    # -- importing an older cache --------------------------------------------
+
+    def _build_import_group(self):
+        group = Adw.PreferencesGroup(
+            title="Import an older cache",
+            description="Upgrading does not throw the folder sizes you "
+                        "already measured away, but it does not use them "
+                        "blindly either. Whatever is found on this machine is "
+                        "listed here, including caches left by the old "
+                        "nautilus-total-size name; importing merges one into "
+                        "the cache this version uses.")
+
+        self._cache_choices = []
+        self._cache_dropdown = Gtk.DropDown(valign=Gtk.Align.CENTER,
+                                            hexpand=True)
+        found_row = Adw.ActionRow(title="Found on this machine")
+        found_row.add_suffix(self._cache_dropdown)
+        group.add(found_row)
+
+        self._import_entry = Gtk.Entry(
+            hexpand=True, valign=Gtk.Align.CENTER,
+            placeholder_text="/path/to/sizes.json")
+        manual_row = Adw.ActionRow(
+            title="Or a file you point at",
+            subtitle="Used instead of the list above whenever this is filled "
+                     "in, for a cache kept somewhere unusual")
+        manual_row.add_suffix(self._import_entry)
+        group.add(manual_row)
+
+        rescan = Gtk.Button(label="Scan again", margin_top=6)
+        rescan.connect("clicked", lambda _button: self._rescan_caches())
+        self._import_button = Gtk.Button(label="Import", margin_top=6)
+        self._import_button.add_css_class("suggested-action")
+        self._import_button.connect("clicked", self._on_import_clicked)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                          halign=Gtk.Align.END)
+        buttons.append(rescan)
+        buttons.append(self._import_button)
+        button_row = Adw.ActionRow()
+        button_row.add_suffix(buttons)
+        group.add(button_row)
+
+        self._rescan_caches()
+        return group
+
+    def _rescan_caches(self):
+        """Auto-detect. Re-runnable, because the answer changes.
+
+        Someone can plug in the drive their old cache lives on, or move a
+        file, while this window is open, and a detection that only ever ran at
+        startup would keep insisting there is nothing there.
+        """
+        self._cache_choices = self._extension.find_existing_caches()
+
+        labels = Gtk.StringList()
+        for path, version, count, modified in self._cache_choices:
+            labels.append("%s  (%d folders, format %s, %s)"
+                          % (path, count, version,
+                             time.strftime("%Y-%m-%d %H:%M",
+                                           time.localtime(modified))))
+        if not self._cache_choices:
+            labels.append("Nothing found")
+
+        self._cache_dropdown.set_model(labels)
+        self._cache_dropdown.set_sensitive(bool(self._cache_choices))
+
+    def _chosen_import_source(self):
+        """The file the Import button should read, or None with a reason said.
+
+        The typed path wins over the detected list whenever it is filled in.
+        Detection cannot know about a cache on a drive that is not mounted at
+        the same place any more, and "the box I typed in is ignored because
+        something was selected in a list above it" is a maddening thing to
+        debug from the outside.
+        """
+        typed = self._import_entry.get_text().strip()
+        if typed:
+            return os.path.expanduser(typed)
+
+        if not self._cache_choices:
+            self._say("Nothing was found to import. If you have a sizes.json "
+                      "somewhere unusual, type its path in the box.")
+            return None
+
+        selected = self._cache_dropdown.get_selected()
+        if selected >= len(self._cache_choices):
+            self._say("Choose which cache to import first.")
+            return None
+        return self._cache_choices[selected][0]
+
+    def _on_import_clicked(self, _button):
+        source = self._chosen_import_source()
+        if source is None:
+            return
+
+        if not self._extension.CACHE_PATH:
+            self._say("On-disk caching is switched off, so there is nowhere "
+                      "to import into. Turn it on and save first.")
+            return
+        if os.path.abspath(source) == os.path.abspath(
+                self._extension.CACHE_PATH):
+            self._say("That is the cache this version already uses.")
+            return
+
+        version, entries = self._extension.read_cache_file(source)
+        if version is None:
+            self._say("%s is not a size cache, or cannot be read." % source)
+            return
+        if not entries:
+            self._say("%s holds no usable entries." % source)
+            return
+
+        # Merge rather than replace, and let the imported values win: they are
+        # what the user just asked for, and anything measured since is about
+        # to be re-measured anyway the moment its directory changes.
+        cache = self._extension.load_cache()
+        already = len(cache)
+        cache.update(entries)
+        overlapped = already + len(entries) - len(cache)
+
+        limit = self._extension.CACHE_LIMIT
+        capped = 0
+        if len(cache) > limit:
+            capped = len(cache) - limit
+            cache = dict(sorted(cache.items(), key=lambda item: item[1][1],
+                                reverse=True)[:limit])
+
+        if not self._extension.save_cache(cache):
+            self._say("Could not write %s." % self._extension.CACHE_PATH)
+            return
+
+        message = ["Imported %d folders from %s." % (len(entries), source)]
+        if overlapped:
+            message.append("%d were already known and were overwritten."
+                           % overlapped)
+        if capped:
+            message.append("Dropped the %d smallest to stay under the %d "
+                           "entry limit." % (capped, limit))
+        message.append("The cache now holds %d folders. Run 'nautilus -q' to "
+                       "pick them up." % len(cache))
+
+        if version != self._extension.CACHE_FORMAT:
+            message.append(
+                "\nThese came from an older version, whose totals did not "
+                "count hard links once per link and did not count the size of "
+                "symlinks. On folders using those they will read slightly low "
+                "until the folder changes, or until you re-index it below. "
+                "Every other folder is exact.")
+
+        self._say(" ".join(message))
+
+    # -- indexing ------------------------------------------------------------
+
+    def _build_index_group(self):
+        group = Adw.PreferencesGroup(
+            title="Pre-index drives",
+            description="Measures every folder on a drive up front so sizes "
+                        "show instantly instead of being measured as you "
+                        "browse. Reads only; nothing on the drive is changed.")
+
+        drives = self._indexer.list_drives()
+        if not drives:
+            group.add(Adw.ActionRow(title="No local drives found"))
+            return group
+
+        for mount_point, fs_type, device in drives:
+            check = Gtk.CheckButton(valign=Gtk.Align.CENTER)
+            check.mount_point = mount_point
+            row = Adw.ActionRow(title=GLib.markup_escape_text(mount_point),
+                                subtitle="%s on %s" % (fs_type, device))
+            row.add_prefix(check)
+            row.set_activatable_widget(check)
+            group.add(row)
+            self._drive_checks.append(check)
+
+        self._progress = Gtk.ProgressBar(show_text=True, text="Idle",
+                                         margin_top=6)
+        progress_row = Adw.ActionRow()
+        progress_row.set_child(self._progress)
+        group.add(progress_row)
+
+        self._index_button = Gtk.Button(label="Index selected drives now",
+                                        halign=Gtk.Align.END, margin_top=6)
+        self._index_button.add_css_class("suggested-action")
+        self._index_button.connect("clicked", self._on_index_clicked)
+
+        button_row = Adw.ActionRow()
+        button_row.add_suffix(self._index_button)
+        group.add(button_row)
+        return group
+
+    def _on_index_clicked(self, _button):
+        if self._worker is not None:            # already running: this is Stop
+            self._stop.set()
+            self._index_button.set_sensitive(False)
+            self._progress.set_text("Stopping...")
+            return
+
+        targets = [c.mount_point for c in self._drive_checks if c.get_active()]
+        if not targets:
+            self._say("Select at least one drive first.")
+            return
+        if not self._extension.CACHE_PATH:
+            self._say("On-disk caching is off, so there is nowhere to write "
+                      "an index. Turn it on and save first.")
+            return
+
+        self._stop.clear()
+        self._index_button.set_label("Stop")
+        self._progress.set_fraction(0.0)
+        self._progress.set_text("Starting...")
+
+        self._worker = threading.Thread(target=self._index_worker,
+                                        args=(targets,), daemon=True)
+        self._worker.start()
+
+    def _index_worker(self, targets):
+        """Runs off the main thread; every UI touch goes back via idle_add."""
+        cache = self._extension.load_cache()
+        indexed = 0
+        stopped = False
+
+        for position, target in enumerate(targets, start=1):
+            def progress(scanned, current, _t=target, _n=position):
+                if self._stop.is_set():
+                    raise Cancelled()
+                GLib.idle_add(self._show_progress, _n, len(targets),
+                              scanned, current)
+
+            GLib.idle_add(self._show_progress, position, len(targets), 0, target)
+            try:
+                # Every 200 directories rather than the command line's 2000:
+                # this callback is also the only place Stop is noticed, and a
+                # button that takes a minute to respond reads as a hang.
+                found = self._indexer.index_tree(target, cross_mounts=False,
+                                                 on_progress=progress,
+                                                 progress_every=200)
+            except Cancelled:
+                # The drive that was interrupted contributes nothing, but the
+                # drives already finished are kept -- discarding minutes of
+                # disk reads over a Stop click is how you train someone never
+                # to press the button.
+                stopped = True
+                break
+            except Exception as error:
+                GLib.idle_add(self._say, "Indexing %s failed: %s"
+                              % (target, error))
+                continue
+
+            cache.update(found)
+            indexed += len(found)
+
+        limit = self._extension.CACHE_LIMIT
+        if len(cache) > limit:
+            kept = sorted(cache.items(), key=lambda item: item[1][1],
+                          reverse=True)[:limit]
+            cache = dict(kept)
+
+        saved = self._extension.save_cache(cache)
+        GLib.idle_add(self._index_finished, indexed, saved, stopped)
+
+    def _show_progress(self, position, total, scanned, current):
+        self._progress.set_fraction(
+            (position - 1 + 0.5) / total if total else 0.0)
+        self._progress.set_text("Drive %d/%d - %d folders - %s"
+                                % (position, total, scanned,
+                                   os.path.basename(current) or current))
+        return GLib.SOURCE_REMOVE
+
+    def _index_finished(self, indexed, saved, stopped):
+        self._worker = None
+        self._stop.clear()
+        self._index_button.set_label("Index selected drives now")
+        self._index_button.set_sensitive(True)
+        self._progress.set_fraction(1.0 if not stopped else 0.0)
+
+        if not saved:
+            self._progress.set_text("Could not write the cache")
+            self._say("Indexed %d folders but could not write the cache."
+                      % indexed)
+        else:
+            self._progress.set_text("%d folders indexed%s"
+                                    % (indexed, " (stopped)" if stopped else ""))
+            self._say("Indexed %d folders. Run 'nautilus -q' to pick them up."
+                      % indexed)
+        return GLib.SOURCE_REMOVE
+
+    # -- autostart -----------------------------------------------------------
+
+    def _build_autostart_group(self):
+        group = Adw.PreferencesGroup(
+            title="Index at login",
+            description="Keeps sizes ready without you thinking about it. "
+                        "The first login after switching this on measures the "
+                        "folders below in full; every login after that only "
+                        "re-measures what changed, which is far quicker. It "
+                        "waits %d seconds after you log in and runs at low "
+                        "priority, so it does not compete with your session "
+                        "starting up."
+                        % self._indexer.AUTOSTART_DELAY_S)
+
+        self._autostart_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._autostart_switch.set_active(self._autostart_enabled())
+        self._autostart_switch.connect("notify::active",
+                                       self._on_autostart_toggled)
+
+        row = Adw.ActionRow(title="Index at every login",
+                            subtitle=self._autostart_source())
+        row.add_suffix(self._autostart_switch)
+        row.set_activatable_widget(self._autostart_switch)
+        group.add(row)
+
+        self._autostart_dirs_row = Adw.ActionRow(title="Folders it will index")
+        group.add(self._autostart_dirs_row)
+        self._refresh_autostart_dirs_row()
+
+        button = Gtk.Button(label="Use the drives ticked above",
+                            halign=Gtk.Align.END, margin_top=6)
+        button.connect("clicked", self._on_autostart_dirs_clicked)
+        button_row = Adw.ActionRow()
+        button_row.add_suffix(button)
+        group.add(button_row)
+        return group
+
+    def _autostart_source(self):
+        if os.path.exists(self._extension.AUTOSTART_SYSTEM_PATH):
+            return ("Installed for every account by the package; this switch "
+                    "changes yours only")
+        return "No system-wide entry found, so this writes one just for you"
+
+    @staticmethod
+    def _desktop_is_hidden(path):
+        """True if `path` exists and says Hidden=true.
+
+        A dumb line scan rather than GLib.KeyFile on purpose: KeyFile raises
+        on anything it considers malformed, and this file is one a user is
+        positively invited to hand-edit.  A stray line there should not turn a
+        settings window into a traceback.
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    key, _, value = line.partition("=")
+                    if key.strip().lower() == "hidden":
+                        return value.strip().lower() == "true"
+        except OSError:
+            return False
+        return False
+
+    def _autostart_enabled(self):
+        """Will a login run actually happen for this account?
+
+        The user's own file wins outright when it exists -- that is the whole
+        point of the XDG same-name rule -- so only fall back to asking whether
+        the package's entry is installed when there is no override.
+        """
+        user_path = self._extension.AUTOSTART_USER_PATH
+        if os.path.exists(user_path):
+            return not self._desktop_is_hidden(user_path)
+        return os.path.exists(self._extension.AUTOSTART_SYSTEM_PATH)
+
+    def _indexer_command(self):
+        """The command a self-written autostart entry should run."""
+        installed = "/usr/bin/show-folder-size-index"
+        if os.path.exists(installed):
+            return installed
+        # Running from a clone: point at the file we actually imported, so
+        # the entry keeps working without the package installed.
+        return os.path.abspath(self._indexer.__file__)
+
+    def _enable_autostart(self):
+        if os.path.exists(self._extension.AUTOSTART_SYSTEM_PATH):
+            # Delete our override rather than writing an enabled copy, so the
+            # package's own entry applies -- and keeps applying if a future
+            # version changes its Exec line.  A copy would freeze today's.
+            try:
+                os.unlink(self._extension.AUTOSTART_USER_PATH)
+            except FileNotFoundError:
+                pass
+            return
+        self._write_autostart_desktop(hidden=False)
+
+    def _disable_autostart(self):
+        self._write_autostart_desktop(hidden=True)
+
+    def _write_autostart_desktop(self, hidden):
+        path = self._extension.AUTOSTART_USER_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        body = AUTOSTART_DESKTOP % {
+            "exec": "%s --autostart"
+                    % desktop_exec_quote(self._indexer_command()),
+            "hidden": "true" if hidden else "false",
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+
+    def _on_autostart_toggled(self, switch, _param):
+        wanted = switch.get_active()
+        try:
+            if wanted:
+                self._enable_autostart()
+            else:
+                self._disable_autostart()
+        except OSError as error:
+            self._say("Could not change the login setting: %s" % error)
+            return
+        self._say("Login indexing %s. It takes effect at your next login."
+                  % ("enabled" if wanted else "disabled"))
+
+    def _refresh_autostart_dirs_row(self):
+        configured = self._extension.read_config_value(
+            self._extension.AUTOSTART_DIRS_KEY)
+        targets = self._indexer.autostart_targets()
+
+        if not targets:
+            subtitle = "Nothing selected, so a login run would do nothing"
+        elif configured is None:
+            subtitle = "%s (the default, until you choose)" % targets[0]
+        else:
+            subtitle = ", ".join(targets)
+        self._autostart_dirs_row.set_subtitle(
+            GLib.markup_escape_text(subtitle))
+
+    def _on_autostart_dirs_clicked(self, _button):
+        chosen = [check.mount_point for check in self._drive_checks
+                  if check.get_active()]
+        if not chosen:
+            chosen = [os.path.expanduser("~")]
+
+        # The list is colon-separated like PATH, which has no escape for a
+        # colon inside an entry.  Refusing to save is the honest outcome:
+        # writing it anyway would produce a config that reads back as two
+        # directories, neither of which exists.
+        awkward = [path for path in chosen if ":" in path]
+        if awkward:
+            self._say("Cannot save %s. The list is colon-separated, like "
+                      "PATH, so a path with a colon in it cannot be written "
+                      "unambiguously." % ", ".join(awkward))
+            return
+
+        try:
+            write_user_config(
+                {self._extension.AUTOSTART_DIRS_KEY: ":".join(chosen)})
+        except OSError as error:
+            self._say("Could not write %s: %s" % (CONFIG_PATH, error))
+            return
+
+        self._refresh_autostart_dirs_row()
+        self._say("The login run will index:\n%s" % "\n".join(chosen))
+
+    # -- feedback ------------------------------------------------------------
+
+    def _say(self, message):
+        dialog = Adw.MessageDialog(transient_for=self, body=message,
+                                   heading="Folder Size Setup")
+        dialog.add_response("ok", "OK")
+        dialog.present()
+        return GLib.SOURCE_REMOVE
+
+
+def ensure_cache_dir_recorded(extension):
+    """Write the resolved cache location down if nothing states it yet.
+
+    "Where is the cache" should not be a question anyone has to answer by
+    re-deriving the precedence rules, least of all an upgrade trying to work
+    out what there is to import.  When neither the environment nor either
+    config file names a location, the answer exists only as the XDG default
+    computed at import time, so write it into the user's config and make it a
+    fact on disk.
+
+    Deliberately does NOT record a location that came from the environment or
+    from /etc.  Copying either into the user's own file pins it: an admin
+    changing /etc afterwards would silently stop reaching this account, and
+    the value would look like a choice the user made when they never did.
+    """
+    if os.environ.get(extension.CACHE_ENV_VAR) is not None:
+        return False
+    if extension.read_config_value("cache_dir") is not None:
+        return False
+    if not extension.CACHE_DIR:
+        return False
+    try:
+        write_user_config({"cache_dir": extension.CACHE_DIR})
+    except OSError:
+        return False        # not fatal: everything still resolves as before
+    return True
+
+
+class SetupApplication(Adw.Application):
+
+    def __init__(self, extension, indexer):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.FLAGS_NONE)
+        self._extension = extension
+        self._indexer = indexer
+
+    def do_activate(self):
+        window = self.props.active_window
+        if window is None:
+            window = SetupWindow(self, self._extension, self._indexer)
+        window.present()
+
+
+def main(argv=None):
+    extension = _load("show_folder_size", "show_folder_size.py")
+    if extension is None:
+        print("error: show_folder_size.py not found. Looked in:\n  %s"
+              % "\n  ".join(_SEARCH_PATHS), file=sys.stderr)
+        return 1
+
+    indexer = _load("show_folder_size_index", "show-folder-size-index")
+    if indexer is None:
+        print("error: show-folder-size-index not found. Looked in:\n  %s"
+              % "\n  ".join(_SEARCH_PATHS), file=sys.stderr)
+        return 1
+
+    ensure_cache_dir_recorded(extension)
+
+    # sys.argv[:1], not []: GApplication takes the program name from argv[0],
+    # and with FLAGS_NONE anything past it is an error rather than an option.
+    return SetupApplication(extension, indexer).run(
+        sys.argv[:1] if argv is None else argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
