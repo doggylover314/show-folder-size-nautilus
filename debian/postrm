@@ -1,6 +1,25 @@
 #!/bin/sh
 # Remove our config on purge only, never on a plain remove/upgrade.
 set -e
+
+case "$1" in
+    remove|purge)
+        # dpkg deletes the gschema override file itself, but the compiled
+        # schema cache still carries its values until rebuilt. Skipping this
+        # would leave Total Size in everyone's default column list after the
+        # package is gone.
+        if command -v glib-compile-schemas >/dev/null 2>&1; then
+            glib-compile-schemas /usr/share/glib-2.0/schemas || true
+        fi
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q /usr/share/applications || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
+        fi
+        ;;
+esac
+
 case "$1" in
     purge)
         rm -f /etc/show-folder-size-nautilus.conf

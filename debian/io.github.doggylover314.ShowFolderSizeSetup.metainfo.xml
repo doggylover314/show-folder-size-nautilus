@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata. Without this, double-clicking the .deb opens GNOME
+  Software showing a bare package name, no icon and no description, which
+  looks like something went wrong. With it, the package renders as a proper
+  application entry.
+
+  The component id must match the .desktop filename exactly, or GNOME
+  Software will not associate the two and the icon stays missing.
+-->
+<component type="desktop-application">
+  <id>io.github.doggylover314.ShowFolderSizeSetup</id>
+  <launchable type="desktop-id">io.github.doggylover314.ShowFolderSizeSetup.desktop</launchable>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Folder Size Setup</name>
+  <summary>Show recursive folder sizes in GNOME Files</summary>
+
+  <developer id="io.github.doggylover314">
+    <name>doggylover314</name>
+  </developer>
+
+  <description>
+    <p>
+      Adds a "Total Size" column to the GNOME Files list view showing the
+      recursive size of a folder's contents — the same number the Properties
+      window reports, instead of the built-in item count.
+    </p>
+    <p>
+      Sizes are measured in the background and cached, so browsing never
+      blocks. This setup window lets you choose where that cache lives, turn
+      the column on or off, decide what gets indexed at login, and pre-index
+      whole drives so sizes appear instantly from the first look.
+    </p>
+    <p>Notes on what it touches:</p>
+    <ul>
+      <li>Folder contents are only ever read, never modified.</li>
+      <li>Symbolic links are never followed, so nothing is counted twice.</li>
+      <li>No network access.</li>
+      <li>
+        There is no background service. Indexing runs once at login, after a
+        delay and at low priority, then exits; you can switch it off.
+      </li>
+      <li>On-disk caching can be switched off entirely.</li>
+    </ul>
+  </description>
+
+  <categories>
+    <category>System</category>
+    <category>Settings</category>
+  </categories>
+
+  <keywords>
+    <keyword>folder</keyword>
+    <keyword>size</keyword>
+    <keyword>disk usage</keyword>
+    <keyword>nautilus</keyword>
+    <keyword>column</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/doggylover314/show-folder-size-nautilus</url>
+  <url type="bugtracker">https://github.com/doggylover314/show-folder-size-nautilus/issues</url>
+
+  <provides>
+    <binary>show-folder-size-setup</binary>
+    <binary>show-folder-size-index</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-08-22">
+      <description>
+        <p>
+          First stable release. Folder sizes are now kept up to date by an
+          indexing run at login, in full the first time and then only where
+          something changed.
+        </p>
+        <p>
+          Measurement was made consistent: the indexer and the fallback walk
+          now report exactly what the Properties window does, where before
+          they could disagree about the same folder.
+        </p>
+        <p>
+          Indexing no longer walks filesystems it was told to skip, and drives
+          whose names are not plain ASCII are listed correctly.
+        </p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-08-05">
+      <description>
+        <p>
+          Adds a setup window, an installable desktop entry, and enables the
+          Total Size column automatically on first run.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

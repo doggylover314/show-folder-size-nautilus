@@ -4,10 +4,15 @@
 # Needs only dpkg-deb (dpkg-dev), which Debian/Ubuntu already have.
 # Produces ./dist/show-folder-size-nautilus_<version>_all.deb
 #
-# The package installs one Python file system-wide to
-# /usr/share/nautilus-python/extensions/ and nothing else. It runs no
-# maintainer scripts that touch your files and does not restart nautilus for
-# you -- you do that yourself with `nautilus -q`.
+# The package installs the extension to /usr/share/nautilus-python/extensions/,
+# two commands to /usr/bin, and desktop integration: a .desktop entry, an icon,
+# AppStream metainfo, a gschema override that makes the column visible by
+# default, and an /etc/xdg/autostart entry that keeps folder sizes indexed.
+#
+# Its maintainer scripts write /etc/show-folder-size-nautilus.conf and rebuild
+# three system caches (gschema, desktop, icon). They touch nothing in anyone's
+# home directory and do not restart nautilus for you -- you do that yourself
+# with `nautilus -q`.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,15 +37,69 @@ OUT="${HERE}/dist"
 
 echo "Building ${PKG} ${VERSION}"
 rm -rf "${BUILD}"
+APPID="io.github.doggylover314.ShowFolderSizeSetup"
+# Must match AUTOSTART_DESKTOP_NAME in show_folder_size.py: the setup app
+# overrides this exact filename in ~/.config/autostart to switch the login
+# indexer off, and an override under any other name does nothing at all.
+AUTOSTART_ID="io.github.doggylover314.ShowFolderSizeIndex"
+
+# The AppStream metainfo carries its own version list, and GNOME Software
+# shows the newest entry in it rather than the dpkg version. Nothing links the
+# two, so they drift silently: 0.6.0 sat in the metainfo through several
+# releases and the only symptom was the wrong version in the software centre.
+# Refuse to build rather than ship that.
+META="${HERE}/debian/${APPID}.metainfo.xml"
+META_VERSION="$(sed -n 's/.*<release version="\([^"]*\)".*/\1/p' "${META}" | head -n 1)"
+if [[ "${META_VERSION}" != "${VERSION}" ]]; then
+    echo "error: version drift. show_folder_size.py says ${VERSION}, but the" >&2
+    echo "       newest <release> in ${META##*/} says ${META_VERSION}." >&2
+    echo "       Add a <release version=\"${VERSION}\" date=\"...\"> entry." >&2
+    exit 1
+fi
+
 mkdir -p "${BUILD}/DEBIAN" \
          "${BUILD}/usr/share/nautilus-python/extensions" \
          "${BUILD}/usr/bin" \
+         "${BUILD}/usr/share/applications" \
+         "${BUILD}/usr/share/metainfo" \
+         "${BUILD}/usr/share/glib-2.0/schemas" \
+         "${BUILD}/usr/share/icons/hicolor/scalable/apps" \
+         "${BUILD}/etc/xdg/autostart" \
          "${BUILD}/usr/share/doc/${PKG}"
 
 install -m 0644 "${SRC}" "${BUILD}/usr/share/nautilus-python/extensions/"
 install -m 0755 "${HERE}/show-folder-size-index" "${BUILD}/usr/bin/show-folder-size-index"
+install -m 0755 "${HERE}/show-folder-size-setup" "${BUILD}/usr/bin/show-folder-size-setup"
 install -m 0644 "${HERE}/README.md"  "${BUILD}/usr/share/doc/${PKG}/"
 install -m 0644 "${HERE}/INSTALL.md" "${BUILD}/usr/share/doc/${PKG}/"
+
+# Desktop integration. The .desktop gives the setup app a menu entry; the
+# metainfo is what makes GNOME Software render this as an application with an
+# icon and a description instead of a bare package name when the .deb is
+# opened by double-clicking it.
+install -m 0644 "${HERE}/debian/${APPID}.desktop" \
+        "${BUILD}/usr/share/applications/"
+install -m 0644 "${HERE}/debian/${APPID}.metainfo.xml" \
+        "${BUILD}/usr/share/metainfo/"
+install -m 0644 "${HERE}/debian/${APPID}.svg" \
+        "${BUILD}/usr/share/icons/hicolor/scalable/apps/"
+
+# Makes Total Size a visible column by default. postinst recompiles the
+# schema cache, without which an override file has no effect at all.
+install -m 0644 "${HERE}/debian/90_${PKG}.gschema.override" \
+        "${BUILD}/usr/share/glib-2.0/schemas/"
+
+# The login indexer, for every account on the machine. /etc/xdg/autostart
+# rather than /usr/share: the XDG autostart spec looks in $XDG_CONFIG_DIRS,
+# which is /etc/xdg, and a per-user file of the same name in
+# ~/.config/autostart replaces it -- which is how "Folder Size Setup" can
+# switch it off for one account without root.
+#
+# NOT a conffile: it is under /etc but it is ours, users override it in their
+# own directory rather than by editing it, and listing it would mean a dpkg
+# prompt on every upgrade for a file nobody was supposed to edit.
+install -m 0644 "${HERE}/debian/${AUTOSTART_ID}.desktop" \
+        "${BUILD}/etc/xdg/autostart/"
 
 # Debian wants the licence as `copyright`.
 install -m 0644 "${HERE}/LICENSE" "${BUILD}/usr/share/doc/${PKG}/copyright"
@@ -48,13 +107,23 @@ install -m 0644 "${HERE}/LICENSE" "${BUILD}/usr/share/doc/${PKG}/copyright"
 gzip -9cn "${HERE}/CHANGELOG.md" > "${BUILD}/usr/share/doc/${PKG}/changelog.gz"
 chmod 0644 "${BUILD}/usr/share/doc/${PKG}/changelog.gz"
 
+# Conflicts/Replaces/Provides on nautilus-total-size, the name this package
+# used up to 0.4.0. The rename in 0.5.0 also renamed every file it ships
+# (total_size_column.py -> show_folder_size.py, total-size-index ->
+# show-folder-size-index), so dpkg saw two unrelated packages with no
+# overlapping paths and cheerfully installed both -- nautilus then loaded two
+# extensions and drew TWO "Total Size" columns. Conflicts+Replaces is the
+# standard renamed-package pair and makes apt remove the old one.
 cat > "${BUILD}/DEBIAN/control" <<EOF
 Package: ${PKG}
 Version: ${VERSION}
 Section: gnome
 Priority: optional
 Architecture: ${ARCH}
-Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus (>= 43), debconf (>= 0.5) | debconf-2.0
+Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus (>= 43), gir1.2-gtk-4.0, gir1.2-adw-1, debconf (>= 0.5) | debconf-2.0
+Conflicts: nautilus-total-size
+Replaces: nautilus-total-size
+Provides: nautilus-total-size
 Maintainer: ${MAINTAINER}
 Homepage: ${HOMEPAGE}
 Description: Total Size column for GNOME Files showing recursive folder sizes
@@ -63,14 +132,24 @@ Description: Total Size column for GNOME Files showing recursive folder sizes
  reports, instead of the built-in item count.
  .
  Sizes are measured in the background with Gio.File.measure_disk_usage and
- cached in memory, so browsing never blocks. The extension only reads the
- filesystem: no writes, no network access and no subprocesses.
+ cached on disk, so browsing never blocks and a folder measured once stays
+ instant across restarts. There is no network access and no subprocess use.
+ Writes are limited to the size cache, one marker file recording that the
+ column was enabled, and that column setting itself; the extension's header
+ comment lists each one and how to prevent it.
  .
- After installing, run "nautilus -q", then enable the column in List View via
- the view menu, Visible Columns.
+ The column is enabled automatically the first time the extension loads, so
+ after installing you only need to run "nautilus -q". Untick it in List View
+ under the view menu, Visible Columns, if you would rather not have it.
  .
- The show-folder-size-index command pre-computes sizes for whole drives so browsing
- them is instant from the first look.
+ Folder sizes are indexed at each login, in full the first time and then only
+ where something changed, after a short delay and at low priority. Each user
+ can switch that off or choose which folders it covers.
+ .
+ "Folder Size Setup" (show-folder-size-setup) is a small window for choosing
+ where sizes are cached, what the login indexing covers, and for pre-indexing
+ whole drives on the spot. The same indexing is available on the command line
+ as show-folder-size-index.
 EOF
 
 # debconf asks where to keep the size cache and postinst records the answer in

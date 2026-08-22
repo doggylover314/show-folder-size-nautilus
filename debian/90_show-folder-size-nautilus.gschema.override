@@ -1,0 +1,23 @@
+# Make "Total Size" a visible column by default in the Nautilus list view.
+#
+# This changes the *default* value of the two keys below. It therefore only
+# affects users who have never customised their visible columns: as soon as
+# anyone ticks or unticks anything in Visible Columns, GSettings writes a
+# dconf value for that key, and a dconf value beats a schema default forever
+# after. Existing users are handled separately by the extension itself, once,
+# on first load -- see _ensure_column_visible() in show_folder_size.py.
+#
+# The lists below are upstream's defaults from org.gnome.nautilus.gschema.xml
+# with our column appended. An override replaces the whole value rather than
+# merging into it, so dropping an entry here would silently remove that
+# column for every user on the system.
+#
+# The 90_ prefix puts this after distribution overrides, which is what we
+# want: a desktop vendor's deliberate column choice should not be undone by
+# installing this package, but appending to it is harmless.
+#
+# Removed by the package's postrm on purge, which then recompiles the schemas.
+
+[org.gnome.nautilus.list-view]
+default-visible-columns=[ 'name', 'size', 'date_modified', 'NautilusPython::total_size' ]
+default-column-order=[ 'name', 'size', 'type', 'owner', 'group', 'permissions', 'mime_type', 'where', 'date_modified', 'date_modified_with_time', 'date_accessed', 'date_created', 'recency', 'starred', 'NautilusPython::total_size' ]

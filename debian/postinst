@@ -10,16 +10,57 @@ case "$1" in
     configure)
         db_get show-folder-size-nautilus/cache-dir || true
         CACHE_DIR="$RET"
+
+        # Carry over any other setting an admin put in this file. The file is
+        # regenerated from the debconf answer on every configure, so anything
+        # not regenerated is destroyed -- and autostart_dirs, which the login
+        # indexer reads from here, is exactly such a setting. (cache_dir is
+        # excluded because it is about to be written from debconf, which the
+        # config script has already seeded from this same file.)
+        PRESERVED=""
+        if [ -f "$CONF" ]; then
+            PRESERVED=$(grep -v '^[[:space:]]*#' "$CONF" \
+                        | grep -v '^[[:space:]]*cache_dir[[:space:]]*=' \
+                        | grep -v '^[[:space:]]*$' || true)
+        fi
+
         cat > "$CONF" <<CONFEOF
-# Written by the show-folder-size-nautilus package. Edit freely.
+# Written by the show-folder-size-nautilus package.
+# cache_dir is regenerated from the debconf answer whenever this package is
+# configured; change it with 'dpkg-reconfigure show-folder-size-nautilus' so
+# the change survives the next upgrade. Other keys here are left alone.
+#
 # Per-user override: ~/.config/show-folder-size-nautilus.conf
-# An empty value disables on-disk caching (nothing is written).
+# An empty cache_dir disables on-disk caching (nothing is written).
+# autostart_dirs= sets what the login indexer walks, colon-separated like
+# PATH; unset means each user's home directory.
 cache_dir=${CACHE_DIR}
 CONFEOF
+        if [ -n "$PRESERVED" ]; then
+            printf '%s\n' "$PRESERVED" >> "$CONF"
+        fi
         chmod 0644 "$CONF"
+
+        # The gschema override makes Total Size a visible column by default.
+        # An override does nothing until the schema cache is recompiled.
+        if command -v glib-compile-schemas >/dev/null 2>&1; then
+            glib-compile-schemas /usr/share/glib-2.0/schemas || true
+        fi
+
+        # Without these the setup app has no menu entry and no icon until the
+        # next login.
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q /usr/share/applications || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
+        fi
 
         echo "show-folder-size-nautilus: cache dir set to '${CACHE_DIR:-(disabled)}'"
         echo "show-folder-size-nautilus: run 'nautilus -q' to load the extension."
+        echo "show-folder-size-nautilus: folder sizes are indexed at each login;"
+        echo "  open 'Folder Size Setup' (or run show-folder-size-setup) to"
+        echo "  choose which folders, or to turn that off for your account."
         ;;
 esac
 exit 0

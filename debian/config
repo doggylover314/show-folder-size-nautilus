@@ -2,6 +2,31 @@
 # debconf frontend: ask where the size cache should live.
 set -e
 . /usr/share/debconf/confmodule
-db_input medium show-folder-size-nautilus/cache-dir || true
+
+CONF=/etc/show-folder-size-nautilus.conf
+
+# Seed the question from whatever the file already says, BEFORE asking it.
+# Without this, postinst rewrites the file from the debconf database on every
+# upgrade, and the database still holds the answer from the original install
+# -- so an admin who edited the file by hand watched the edit silently revert
+# the next time the package was upgraded. Reading the live file back in is the
+# standard fix: it makes the question default to the truth, and it makes a
+# non-interactive upgrade (where the question is never asked) write back
+# exactly what was already there.
+if [ -f "$CONF" ] && grep -q '^[[:space:]]*cache_dir[[:space:]]*=' "$CONF"; then
+    CURRENT=$(sed -n 's/^[[:space:]]*cache_dir[[:space:]]*=[[:space:]]*//p' \
+              "$CONF" | head -n 1)
+    db_set show-folder-size-nautilus/cache-dir "$CURRENT" || true
+fi
+
+# Priority high, not medium: the default debconf priority *is* high, so a
+# medium question is silently skipped on a stock system and the user never
+# sees it. It was written to be asked, so ask it.
+#
+# This still only appears for terminal installs. GNOME Software drives dpkg
+# through PackageKit with a non-interactive frontend, where every question is
+# answered with its default and nothing is shown. That path is served by
+# show-folder-size-setup instead.
+db_input high show-folder-size-nautilus/cache-dir || true
 db_go || true
 exit 0

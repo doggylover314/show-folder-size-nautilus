@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Folder Size Setup icon: a folder with a fill gauge, drawn to read at
+     32px as well as at full size. Flat shapes only, no gradients, so it
+     stays legible under both light and dark shell themes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"
+     viewBox="0 0 128 128">
+  <rect x="12" y="30" width="104" height="76" rx="10" fill="#3584e4"/>
+  <path d="M12 40 v-6 a10 10 0 0 1 10-10 h26 l10 12 h48 a10 10 0 0 1 10 10 v4 z"
+        fill="#1c71d8"/>
+  <rect x="26" y="58" width="76" height="14" rx="7" fill="#ffffff"
+        opacity="0.35"/>
+  <rect x="26" y="58" width="50" height="14" rx="7" fill="#ffffff"/>
+  <rect x="26" y="82" width="76" height="10" rx="5" fill="#ffffff"
+        opacity="0.35"/>
+  <rect x="26" y="82" width="30" height="10" rx="5" fill="#ffffff"/>
+</svg>

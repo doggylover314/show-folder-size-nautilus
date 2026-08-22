@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Folder Size Indexing
+Comment=Keep folder sizes for the Total Size column up to date
+Exec=/usr/bin/show-folder-size-index --autostart
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+
+# Installed to /etc/xdg/autostart, so it applies to every account on the
+# machine. Individual users switch it off in "Folder Size Setup", which writes
+# a file of this same name into ~/.config/autostart with Hidden=true -- the
+# XDG autostart spec makes a same-named user file replace this one, which is
+# the only way a normal user can override a file they cannot write.
+#
+# No X-GNOME-Autostart-Delay here even though GNOME supports it: the wait and
+# the low priority are inside --autostart itself, so they apply on every
+# desktop rather than only on the one that invented the key.
+#
+# NoDisplay because this is not something to launch from a menu. It indexes
+# and exits; an entry that looks like an application but shows no window is a
+# bug report waiting to be filed.

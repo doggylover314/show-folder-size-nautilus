@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Folder Size Setup
+GenericName=Folder Size Column Settings
+Comment=Choose where folder sizes are cached and pre-index your drives
+Exec=show-folder-size-setup
+Icon=io.github.doggylover314.ShowFolderSizeSetup
+Terminal=false
+Categories=GNOME;GTK;Settings;
+Keywords=folder;size;disk;usage;nautilus;files;column;cache;index;
+StartupNotify=true
