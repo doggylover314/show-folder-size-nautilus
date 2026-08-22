@@ -4,6 +4,206 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-08-22
+
+First stable release. Sizes now keep themselves up to date, and the three
+different ways this project measures a folder finally agree on the answer.
+
+### Added
+- **Indexing at login.** The `.deb` installs
+  `/etc/xdg/autostart/io.github.doggylover314.ShowFolderSizeIndex.desktop`,
+  which runs `show-folder-size-index --autostart`: a full index of the
+  configured directories the first time, and afterwards only a re-measure of
+  what changed. It waits 30 seconds, runs at `nice 10`, indexes, and exits.
+  No daemon, no timer, nothing resident.
+
+  The default is **your home directory**, not every local drive. The entry is
+  system-wide, so a default of "every disk" would mean every account on a
+  shared machine walking every disk at its first login. Set `autostart_dirs=`
+  (colon-separated, like `PATH`) to widen it.
+- **An off switch that a normal user can actually reach.** The setup window's
+  *Index at every login* toggle writes `~/.config/autostart/` +
+  the same filename with `Hidden=true`. Per the XDG autostart spec a user file
+  replaces the system one of that name, which is the only way to override a
+  file in `/etc` without root. Switching it back on **deletes** the override
+  rather than writing an enabled copy, so a later package update to the entry
+  still reaches that account.
+- **`--refresh`** on `show-folder-size-index`: re-measure only directories
+  whose mtime moved. On a barely-changed drive this skips nearly all of the
+  work, because one `lstat` per file is what the work actually is. It is
+  opt-in for manual runs and automatic from the second login onwards. The
+  limitation is stated rather than buried: directory mtime does not move when
+  an existing file is written to in place, so a file growing inside an
+  untouched folder is invisible to a refresh. That is the same assumption the
+  extension's cache key already makes.
+- **A lock file** (`index.lock` in the cache directory, `flock`), so two
+  indexers cannot walk the same drives and race to write the same cache.
+  `flock` rather than a pid file because the kernel releases it however the
+  process dies, so there is no stale lock to detect and mis-handle.
+- `build-deb.sh` now refuses to build when `__version__` and the newest
+  `<release>` in the AppStream metainfo disagree. They had already drifted:
+  the metainfo said 0.6.0 regardless, so GNOME Software showed the wrong
+  version and nothing caught it.
+
+- **A signed apt repository**, built by `build-apt-repo.sh`. This is the
+  update mechanism, and it is deliberately not an updater inside the project:
+  one of those would have needed network access from our own code and a
+  privileged helper to install with, costing two of the properties the audit
+  notes are built on, to reimplement badly what `apt` already does well.
+  Adding the repository means `unattended-upgrades` and GNOME Software handle
+  this package with no further setup. The repository is signed; `[trusted=yes]`
+  is not offered, because teaching people to disable signature checking lasts
+  longer than the inconvenience it saves.
+- **Importing a cache from an older version**, in the setup window. It
+  auto-detects caches on the machine, including under the pre-0.5.0
+  `~/.cache/nautilus-total-size/` path and anywhere an older config file
+  pointed, or takes a path you type. Importing merges rather than replaces,
+  and says plainly when the entries came from a version whose totals read low.
+- **The cache location is written down** the first time the setup window
+  runs, so nothing has to re-derive it from the precedence rules. It records
+  only a location that was previously implicit; one set in `/etc` or the
+  environment is left where it is rather than pinned into the user's file.
+- **An optional `SHOW_FOLDER_SIZE_CACHE` export** to
+  `~/.config/environment.d/`. This is the one place a variable can be set so
+  that a D-Bus activated nautilus inherits it, which a shell cannot do. Off by
+  default and it says so before writing, because it outranks the location set
+  in the window.
+
+### Fixed
+- **Installing over the old package name left both installed.** The 0.5.0
+  rename also renamed every file shipped, so dpkg saw two unrelated packages
+  with no overlapping paths, installed both, and nautilus loaded two
+  extensions and drew **two Total Size columns**. Added the
+  `Conflicts`/`Replaces`/`Provides` triple on `nautilus-total-size`. Verified
+  by resolving the install against a real apt index, not by reading policy.
+- **The indexer walked filesystems it was told to skip.** Pruning a walk means
+  editing `dirnames` in place, which is documented to do nothing when
+  `topdown=False` — and bottom-up is the mode the whole single-pass design
+  needs. So `--cross-mounts` being off filtered the *results* while the walk
+  still read everything: indexing `/` meant reading every mounted external
+  drive, plus `/proc` and `/sys`, in order to throw all of it away. Replaced
+  `os.walk` with an explicit stack that prunes before it descends and still
+  holds only one frame per level of depth.
+- **Drives with non-ASCII names vanished from the list.** `/proc/self/mounts`
+  escapes four characters in octal, and the old decoder was
+  `field.encode().decode("unicode_escape")`, which round-trips through
+  latin-1: `/media/you/Musiqué` came back as `/media/you/MusiquÃ©`,
+  `os.path.isdir()` said no, and the drive was silently dropped. Now only
+  those four escapes are decoded and every other character is left alone.
+- **The three measurement paths disagreed about the same folder.** GIO counts
+  hard-linked files once per link and counts each symlink's own size; the
+  `os.walk` fallback and the indexer de-duplicated hard links by
+  `(st_dev, st_ino)` and skipped symlinks entirely. Which number you saw
+  depended on whether the GIO call happened to fail. All three now do what
+  GIO does, which is what the Properties window shows. Verified by
+  measurement rather than by reading the documentation: totals can now exceed
+  `du`, and that is the intended answer.
+- **The watchdog could pile duplicate work onto the queue forever.** A job
+  outstanding longer than `STUCK_SECONDS` was re-queued unconditionally, but
+  "lost" and "genuinely slower than 45 seconds" look identical from there, so
+  a big enough folder was re-queued every 45 seconds indefinitely: each copy
+  occupying one of four workers measuring the same tree while the queue grew
+  without bound. Re-queueing is now capped, after which the job is dropped.
+- **Saving one setting in the setup window deleted the other.** The config
+  file was rewritten from scratch with only `cache_dir` in it, so saving a
+  cache location would have wiped `autostart_dirs` and vice versa. It is now
+  read-modify-write.
+- **A hand-edited `/etc/show-folder-size-nautilus.conf` reverted on upgrade.**
+  `postinst` regenerated the file from the debconf database, which still held
+  the answer from the original install. The `config` script now seeds debconf
+  from the live file first, and `postinst` carries over any keys it does not
+  generate.
+- **Deleted directories leaked.** A watched directory that was removed kept
+  its cached total (which was then written back to disk) and kept its
+  `GFileMonitor` alive on a dead inode, holding an inotify watch and a slot
+  against `MONITOR_LIMIT` that only ran its eviction when a *new* watch was
+  added. The change handler also called `os.path.isdir()` on every event, once
+  per write, purely to decide where to start.
+- A file descriptor leaked from `save_cache()` whenever `os.fdopen()` itself
+  failed; repeated failures would have exhausted nautilus' descriptors.
+- A worker that hit an unexpected error spun without pause; it now backs off.
+- The self-test printed the fallback's answer for an empty folder, because
+  `gio_bytes or walk_bytes` treats a legitimate 0 as absent.
+
+### Changed
+- The setup window checks for Stop every 200 directories instead of every
+  2000. A Stop button that takes a minute to respond reads as a hang.
+- `README.md` no longer claims the extension writes exactly one file, or that
+  hard links are counted once. Both stopped being true in earlier releases.
+  Every write is now listed in a table with how to prevent each one. The
+  stale "this will change in v0.3.0" note, still sitting inside the section
+  describing v0.3.0 as already done, is gone.
+- The `.deb` description no longer says "no writes".
+- **The cache format version is bumped to 2, discarding existing caches once.**
+  The file's shape is unchanged; what a byte count means is not. Entries are
+  keyed by directory mtime, and correcting how sizes are counted does not
+  touch any directory's mtime, so pre-1.0.0 totals would have been served as
+  cache hits forever. They are measured again instead.
+
+## [0.6.0] - 2026-08-05
+
+Installing by double-clicking the `.deb` now produces a working, configured
+setup without touching a terminal.
+
+### Added
+- **The Total Size column is enabled automatically.** Two mechanisms, because
+  one is not enough:
+  - A gschema override (`90_show-folder-size-nautilus.gschema.override`) adds
+    the column to the *default* value of
+    `org.gnome.nautilus.list-view default-visible-columns`. `postinst` runs
+    `glib-compile-schemas`, without which an override file has no effect at
+    all.
+  - The extension also enables it once, on first load, from inside the user's
+    own session. This is required: ticking any column writes a dconf value,
+    and **a dconf value beats a schema default permanently**, so the override
+    alone is inert for anyone who has ever opened Visible Columns. A package's
+    `postinst` runs as root and has no business writing into anyone's dconf,
+    so the extension is the only correct place for it.
+
+  Done exactly once, recorded by `~/.config/show-folder-size-nautilus-column-added`,
+  so unticking the column afterwards sticks. A column that re-enables itself
+  every restart is one you uninstall the extension to be rid of.
+- **`show-folder-size-setup`**, a GTK window for the configuration that has to
+  happen as *you*, in *your* session: cache location, column on/off, and
+  pre-indexing drives with a progress bar and a working Stop button. Installed
+  with a desktop entry ("Folder Size Setup"), so it is reachable from the
+  applications menu rather than only the command line.
+
+  This exists because **debconf cannot serve a GUI install.** GNOME Software
+  drives dpkg through PackageKit with a non-interactive debconf frontend:
+  every question is silently answered with its default and the user is shown
+  nothing. Worse, `postinst` runs as root while the cache lives under each
+  user's home, so "index my drives during install" could only ever have
+  filled root's cache with sizes nobody reads.
+- **AppStream metainfo and an icon**, so double-clicking the `.deb` renders a
+  proper application entry in GNOME Software instead of a bare package name
+  with no icon or description.
+
+### Fixed
+- **The cache-location question never appeared.** `debian/config` asked it at
+  `db_input medium`, but the default debconf priority *is* high, so a medium
+  question is skipped on any stock system. It has been asked at `high` since
+  the day it was written and never fired once. Terminal installs now show it.
+- `postrm` recompiles the schema cache on `remove`, not just `purge`. dpkg
+  deletes the override file, but the compiled cache keeps serving its values
+  until rebuilt, which would have left Total Size in everyone's default column
+  list after the package was gone.
+
+### Changed
+- Depends on `gir1.2-gtk-4.0` and `gir1.2-adw-1` for the setup window.
+- The setup window is built from `Adw.ActionRow` plus plain GTK widgets rather
+  than `Adw.SwitchRow`/`EntryRow`/`ToolbarView`. Those arrived in libadwaita
+  1.4, and this package declares `nautilus (>= 43)`, which on GNOME 43 means
+  libadwaita 1.2.
+
+### Not changed
+- **A C rewrite is still not planned, now with better evidence.** The hot path
+  has been `Gio.measure_disk_usage()` — already C — since v0.2.0. Measured on
+  one 16,508-file tree: GIO 0.05s against 0.10s for the Python `os.walk`
+  fallback, and 53% of that fallback is `os.lstat`, which a C module pays
+  identically. Rewriting it in C means rewriting the *fallback* to roughly
+  match the C path already being called.
+
 ## [0.2.1] - 2026-08-05
 
 ### Fixed
@@ -170,10 +370,14 @@ sudo apt purge nautilus-total-size      # if you installed the old package
 
 ### Planned
 - Verified support for GNOME 47 and newer.
-- C rewrite of the per-file callback is **not** planned on current evidence:
-  measured at 3.4us per row, 68% of it the `os.lstat` a C module would also
-  pay. Real saving is ~1.1us/row — 55ms on a 50,000-row folder. It would cost
-  the single-auditable-file property and architecture-independent packaging.
+- Sections of this file are out of chronological order (0.2.1 leads, and this
+  block sits between 0.5.0 and 0.2.0). Cosmetic, but worth a tidy pass.
+
+### Not planned
+- **A C rewrite.** See the v0.6.0 notes for the measurements: the hot path is
+  already C, and rewriting the Python fallback would buy back less than the
+  C path it falls back from already delivers. It would also cost the
+  single-auditable-file property and architecture-independent packaging.
 
 ## [0.2.0] - 2026-08-05
 
@@ -238,7 +442,9 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.0.0
+[0.6.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.6.0
 [0.5.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.4.0
 [0.3.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.3.0
