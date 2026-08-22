@@ -221,7 +221,38 @@ from collections import OrderedDict
 
 import gi
 
-gi.require_version("Nautilus", "4.0")
+# Extension ABI versions to try, newest first.  Nautilus 43 moved to GTK4 and
+# bumped libnautilus-extension from 3.0 to 4.0; 42 and everything before it is
+# 3.0.  Pinning "4.0" the way this file used to means the extension does not
+# load at all on a 3.0 desktop -- not a degraded column, no column, and no
+# error anyone sees without turning on tracing first.
+#
+# Asking for the newest one present rather than a fixed string also means a
+# future ABI 5.0 needs one entry added here rather than a code change, and
+# until then a 5.0-only desktop fails the same way 3.0 used to.
+# UNVERIFIED: the 3.0 entry is written from the API this file already uses
+# being present in both ABIs, and has NOT been run against a real 3.0 desktop.
+# No 3.0 typelib was obtainable on the machine this was developed on. Treat
+# "works on Nautilus 42 and earlier" as untested until someone has actually
+# seen the column appear there, and say so in the README rather than claiming
+# support this file cannot demonstrate.
+NAUTILUS_ABI_VERSIONS = ("4.0", "3.0")
+
+NAUTILUS_ABI = None
+for _candidate in NAUTILUS_ABI_VERSIONS:
+    try:
+        gi.require_version("Nautilus", _candidate)
+    except ValueError:
+        continue
+    NAUTILUS_ABI = _candidate
+    break
+
+if NAUTILUS_ABI is None:
+    raise ImportError(
+        "no libnautilus-extension typelib found. Tried: %s. Install "
+        "nautilus-python (python3-nautilus on Debian/Ubuntu)."
+        % ", ".join(NAUTILUS_ABI_VERSIONS))
+
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
 __version__ = "1.0.0"
@@ -951,6 +982,7 @@ class ShowFolderSizeColumn(GObject.GObject,
             column.set_property("xalign", 1.0)
         except (TypeError, ValueError):
             pass
+        _log("registered column on libnautilus-extension %s" % NAUTILUS_ABI)
         return (column,)
 
     # -- Nautilus.InfoProvider ----------------------------------------------

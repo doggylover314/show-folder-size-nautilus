@@ -63,8 +63,19 @@ import time
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+try:
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+except ValueError as _error:
+    # The extension itself needs neither of these, and the package now only
+    # Recommends them, so this window can be missing its toolkit on a desktop
+    # where the column works perfectly well. Say which package is missing
+    # instead of a bare traceback about typelib versions.
+    print("error: this window needs GTK 4 and libadwaita 1 (%s).\n"
+          "Install gir1.2-gtk-4.0 and gir1.2-adw-1, or use the command line:\n"
+          "  show-folder-size-index --help" % _error, file=sys.stderr)
+    raise SystemExit(1)
+
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 APP_ID = "io.github.doggylover314.ShowFolderSizeSetup"
@@ -952,10 +963,32 @@ class SetupWindow(Adw.ApplicationWindow):
     # -- feedback ------------------------------------------------------------
 
     def _say(self, message):
-        dialog = Adw.MessageDialog(transient_for=self, body=message,
-                                   heading="Folder Size Setup")
-        dialog.add_response("ok", "OK")
-        dialog.present()
+        """Show a message with whichever dialog this libadwaita actually has.
+
+        Three of them, because this one window has to span a lot of desktop:
+        Adw.AlertDialog is the current widget, Adw.MessageDialog is what older
+        libadwaita has and is deprecated in newer ones, and Gtk.MessageDialog
+        is the floor if libadwaita is older still. Picking at runtime rather
+        than pinning one means this neither breaks on old desktops nor prints
+        deprecation warnings on new ones.
+        """
+        heading = "Folder Size Setup"
+
+        if hasattr(Adw, "AlertDialog"):
+            dialog = Adw.AlertDialog(heading=heading, body=message)
+            dialog.add_response("ok", "OK")
+            dialog.present(self)
+        elif hasattr(Adw, "MessageDialog"):
+            dialog = Adw.MessageDialog(transient_for=self, heading=heading,
+                                       body=message)
+            dialog.add_response("ok", "OK")
+            dialog.present()
+        else:
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                                       buttons=Gtk.ButtonsType.OK,
+                                       text=heading, secondary_text=message)
+            dialog.connect("response", lambda d, _r: d.destroy())
+            dialog.present()
         return GLib.SOURCE_REMOVE
 
 
@@ -990,8 +1023,13 @@ def ensure_cache_dir_recorded(extension):
 class SetupApplication(Adw.Application):
 
     def __init__(self, extension, indexer):
-        super().__init__(application_id=APP_ID,
-                         flags=Gio.ApplicationFlags.FLAGS_NONE)
+        # DEFAULT_FLAGS is the current name; FLAGS_NONE is the older one and
+        # is deprecated. getattr rather than `or`, because FLAGS_NONE is 0 and
+        # would test false.
+        flags = getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", None)
+        if flags is None:
+            flags = Gio.ApplicationFlags.FLAGS_NONE
+        super().__init__(application_id=APP_ID, flags=flags)
         self._extension = extension
         self._indexer = indexer
 
