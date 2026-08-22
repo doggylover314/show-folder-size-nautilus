@@ -209,6 +209,7 @@ class SetupWindow(Adw.ApplicationWindow):
         self._worker = None
         self._stop = threading.Event()
         self._drive_checks = []
+        self._closing = False
 
         page = Adw.PreferencesPage()
         page.set_vexpand(True)
@@ -220,10 +221,41 @@ class SetupWindow(Adw.ApplicationWindow):
         # group creates.
         page.add(self._build_autostart_group())
 
+        # A Done button, even though the window already has a close control.
+        # Every other button here says "Save" or "Index", so having finished
+        # the settings there is nothing that says you have finished -- which
+        # is exactly the report this came from. Done closes, and closing
+        # applies nothing extra, because each setting is already applied when
+        # you change it.
+        done = Gtk.Button(label="Done")
+        done.add_css_class("suggested-action")
+        done.connect("clicked", lambda _button: self.close())
+        header = Adw.HeaderBar()
+        header.pack_end(done)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(Adw.HeaderBar())
+        box.append(header)
         box.append(page)
         self.set_content(box)
+        self.connect("close-request", self._on_close_request)
+
+    def _on_close_request(self, _window):
+        """Never throw away an index that is halfway through.
+
+        The indexing worker is a daemon thread and the save happens at the
+        END of it, so closing the window quit the application, killed the
+        thread where it stood, and several minutes of disk reading vanished
+        with nothing said. Stop it the way the Stop button does, which keeps
+        everything already measured, and close once it has written.
+        """
+        if self._worker is None:
+            return False                  # nothing running, close normally
+
+        self._stop.set()
+        self._closing = True
+        self._index_button.set_sensitive(False)
+        self._progress.set_text("Finishing and saving before closing...")
+        return True                       # hold the window open until it has
 
     # -- column --------------------------------------------------------------
 
@@ -385,6 +417,20 @@ class SetupWindow(Adw.ApplicationWindow):
 
             value = self._cache_entry.get_text().strip() \
                 if self._cache_switch.get_active() else ""
+
+            # Save the location to the config as well, not just to the
+            # environment. Otherwise typing a custom path and flipping this
+            # switch without pressing Save wrote the new path into the
+            # environment and left the old one in the config -- two files
+            # disagreeing, with the environment silently winning. Setting a
+            # custom location at first setup is exactly what this switch is
+            # for, so make the one action do the whole job.
+            write_user_config({"cache_dir": value})
+            self._extension.CACHE_DIR = os.path.expanduser(value)
+            self._extension.CACHE_PATH = (
+                os.path.join(self._extension.CACHE_DIR, "sizes.json")
+                if value else "")
+
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(
@@ -398,8 +444,10 @@ class SetupWindow(Adw.ApplicationWindow):
             self._say("Could not update %s: %s" % (path, error))
             return
 
-        self._say("Wrote %s. It applies at your next login, and from then on "
-                  "it overrides the location set above." % path)
+        self._say("Cache location set to %s, and exported as %s in %s.\n\n"
+                  "The export applies at your next login, and from then on it "
+                  "overrides the location set above."
+                  % (value or "disabled", self._extension.CACHE_ENV_VAR, path))
 
     def _on_save_cache(self, _button):
         value = self._cache_entry.get_text().strip() \
@@ -716,6 +764,13 @@ class SetupWindow(Adw.ApplicationWindow):
     def _index_finished(self, indexed, saved, stopped):
         self._worker = None
         self._stop.clear()
+
+        # Closing was deferred until the index had written. It has, so go.
+        if self._closing:
+            self._closing = False
+            self.close()
+            return GLib.SOURCE_REMOVE
+
         self._index_button.set_label("Index selected drives now")
         self._index_button.set_sensitive(True)
         self._progress.set_fraction(1.0 if not stopped else 0.0)

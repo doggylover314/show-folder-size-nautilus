@@ -162,6 +162,22 @@ different ways this project measures a folder finally agree on the answer.
   `/etc` that users are told not to edit, so "raise `--max-entries`" was
   advice they had no way to take.
 
+- **Closing the setup window mid-index threw the index away.** The indexing
+  worker is a daemon thread and the save happens at the end of it, so closing
+  the window quit the application, killed the thread where it stood, and
+  several minutes of disk reading vanished with nothing said. Closing now
+  stops it the way the Stop button does, keeping everything already measured,
+  and waits for the write.
+- **Nothing in the setup window said you were finished.** Every button said
+  Save or Index, so having done the setup there was no obvious end to it.
+  Added a Done button.
+- **Exporting the cache location to the environment ignored an unsaved one.**
+  Typing a custom path and flipping the export switch without pressing Save
+  wrote the new path into the environment and left the old one in the config,
+  two files disagreeing with the environment silently winning. The switch now
+  writes both, since setting a custom location during first setup is what it
+  is for.
+
 ### Changed
 - The setup window checks for Stop every 200 directories instead of every
   2000. A Stop button that takes a minute to respond reads as a hang.
