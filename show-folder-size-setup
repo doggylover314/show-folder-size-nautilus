@@ -72,7 +72,8 @@ except ValueError as _error:
     # where the column works perfectly well. Say which package is missing
     # instead of a bare traceback about typelib versions.
     print("error: this window needs GTK 4 and libadwaita 1 (%s).\n"
-          "Install gir1.2-gtk-4.0 and gir1.2-adw-1, or use the command line:\n"
+          "Install gir1.2-gtk-4.0 and gir1.2-adw-1 on Debian/Ubuntu, or\n"
+          "gtk4 and libadwaita on Fedora -- or use the command line:\n"
           "  show-folder-size-index --help" % _error, file=sys.stderr)
     raise SystemExit(1)
 
@@ -203,6 +204,8 @@ def write_user_config(updates):
             "#                  An empty value disables on-disk caching.\n"
             "# autostart_dirs : what the login run indexes, colon-separated\n"
             "#                  like PATH. Absent means your home folder.\n"
+            "# numeric_sort   : 0 makes the column sort alphabetically again,\n"
+            "#                  without the invisible sort key.\n"
             "# This file overrides the system default in\n"
             "# /etc/show-folder-size-nautilus.conf\n")
         for key in sorted(values):
@@ -286,7 +289,36 @@ class SetupWindow(Adw.ApplicationWindow):
         row.add_suffix(self._column_switch)
         row.set_activatable_widget(self._column_switch)
         group.add(row)
+
+        # The escape hatch for the invisible sort key. It is here rather than
+        # buried in a config file because the one thing that could ever go
+        # wrong with it -- a font or a toolkit drawing those characters
+        # instead of hiding them -- is something the user sees and nobody
+        # else can reproduce, and "turn this off" needs to be reachable
+        # without reading the source.
+        self._sort_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self._sort_switch.set_active(self._extension._numeric_sort_enabled())
+        self._sort_switch.connect("notify::active", self._on_sort_toggled)
+
+        sort_row = Adw.ActionRow(
+            title="Sort by size when the header is clicked",
+            subtitle="Off sorts the text instead, so 9.9 kB comes before "
+                     "1.2 GB. Turn it off if the column shows odd characters.")
+        sort_row.add_suffix(self._sort_switch)
+        sort_row.set_activatable_widget(self._sort_switch)
+        group.add(sort_row)
         return group
+
+    def _on_sort_toggled(self, switch, _param):
+        wanted = switch.get_active()
+        try:
+            write_user_config(
+                {self._extension.NUMERIC_SORT_KEY: "1" if wanted else "0"})
+        except OSError as error:
+            self._say("Could not save: %s" % error)
+            return
+        self._say("Sorting set to %s. Run 'nautilus -q' for it to take effect."
+                  % ("by size" if wanted else "alphabetical"))
 
     def _list_settings(self):
         """The Nautilus list-view GSettings, or None if Files isn't installed."""

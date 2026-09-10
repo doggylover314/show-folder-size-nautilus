@@ -19,9 +19,35 @@ wrong on the newest releases. Hence these.
 
 | File | Needs fixtures | Proves |
 |---|---|---|
+| `test_sort_key.py` | no | the "Total Size" header sorts numerically, and the key that makes it do so draws as nothing |
 | `test_abi_selection.py` | no | the right ABI is chosen, on every combination of what might be installed |
 | `test_abi_live.py` | yes | the registration path runs on ABIs this machine does not have |
 | `fetch-abi-fixtures.sh` | — | downloads and extracts the real libraries to make the above possible |
+
+### `test_sort_key.py`
+
+Nautilus sorts an extension's column by running `strcmp()` over the same
+string it draws in the cell, so the extension prefixes each value with a
+fixed-width key built from four zero-width characters. Two claims, two halves
+of this test:
+
+- **It sorts.** Cell values are compared as UTF-8 *bytes*, which is what
+  `strcmp` does, over sizes spanning 0 to 2^64-1. The pairs alphabetical
+  sorting got wrong are listed explicitly, and each one is checked twice:
+  that the key orders it correctly, and that the visible text alone would
+  still get it wrong -- so the test keeps its teeth if somebody ever decides
+  the key looks unnecessary.
+- **It is invisible.** Every digit is laid out through PangoCairo and its ink
+  and logical extents compared against the bare text. This is not decoration:
+  it is how U+034F and U+FE00, both default-ignorable and both plausible
+  candidates, were caught drawing a dotted circle.
+
+The last section writes a config file into a temporary `HOME` and imports the
+extension in a fresh interpreter, to check `numeric_sort=0` really does turn
+the whole thing off.
+
+Nautilus itself is stubbed with two empty `GInterface`s, so this runs on any
+machine with PyGObject -- no file manager, no fixtures, no network.
 
 ### `test_abi_selection.py`
 

@@ -4,6 +4,12 @@
 # Needs only dpkg-deb (dpkg-dev), which Debian/Ubuntu already have.
 # Produces ./dist/show-folder-size-nautilus_<version>_all.deb
 #
+# Everything that is not dpkg-specific lives in data/ and is shared with
+# build-rpm.sh: the .desktop entries, the icon, the AppStream metainfo and the
+# gschema override. debian/ holds only what dpkg itself consumes -- the
+# debconf templates and the maintainer scripts. Two copies of a .desktop file
+# is two copies to forget to update.
+#
 # The package installs the extension to /usr/share/nautilus-python/extensions/,
 # two commands to /usr/bin, and desktop integration: a .desktop entry, an icon,
 # AppStream metainfo, a gschema override that makes the column visible by
@@ -48,7 +54,7 @@ AUTOSTART_ID="io.github.doggylover314.ShowFolderSizeIndex"
 # two, so they drift silently: 0.6.0 sat in the metainfo through several
 # releases and the only symptom was the wrong version in the software centre.
 # Refuse to build rather than ship that.
-META="${HERE}/debian/${APPID}.metainfo.xml"
+META="${HERE}/data/${APPID}.metainfo.xml"
 META_VERSION="$(sed -n 's/.*<release version="\([^"]*\)".*/\1/p' "${META}" | head -n 1)"
 if [[ "${META_VERSION}" != "${VERSION}" ]]; then
     echo "error: version drift. show_folder_size.py says ${VERSION}, but the" >&2
@@ -77,16 +83,16 @@ install -m 0644 "${HERE}/INSTALL.md" "${BUILD}/usr/share/doc/${PKG}/"
 # metainfo is what makes GNOME Software render this as an application with an
 # icon and a description instead of a bare package name when the .deb is
 # opened by double-clicking it.
-install -m 0644 "${HERE}/debian/${APPID}.desktop" \
+install -m 0644 "${HERE}/data/${APPID}.desktop" \
         "${BUILD}/usr/share/applications/"
-install -m 0644 "${HERE}/debian/${APPID}.metainfo.xml" \
+install -m 0644 "${HERE}/data/${APPID}.metainfo.xml" \
         "${BUILD}/usr/share/metainfo/"
-install -m 0644 "${HERE}/debian/${APPID}.svg" \
+install -m 0644 "${HERE}/data/${APPID}.svg" \
         "${BUILD}/usr/share/icons/hicolor/scalable/apps/"
 
 # Makes Total Size a visible column by default. postinst recompiles the
 # schema cache, without which an override file has no effect at all.
-install -m 0644 "${HERE}/debian/90_${PKG}.gschema.override" \
+install -m 0644 "${HERE}/data/90_${PKG}.gschema.override" \
         "${BUILD}/usr/share/glib-2.0/schemas/"
 
 # The login indexer, for every account on the machine. /etc/xdg/autostart
@@ -98,7 +104,7 @@ install -m 0644 "${HERE}/debian/90_${PKG}.gschema.override" \
 # NOT a conffile: it is under /etc but it is ours, users override it in their
 # own directory rather than by editing it, and listing it would mean a dpkg
 # prompt on every upgrade for a file nobody was supposed to edit.
-install -m 0644 "${HERE}/debian/${AUTOSTART_ID}.desktop" \
+install -m 0644 "${HERE}/data/${AUTOSTART_ID}.desktop" \
         "${BUILD}/etc/xdg/autostart/"
 
 # Debian wants the licence as `copyright`.

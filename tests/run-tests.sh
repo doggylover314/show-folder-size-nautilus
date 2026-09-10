@@ -31,6 +31,9 @@ run "compile: every python file parses" \
         "${ROOT}/show-folder-size-index" \
         "${ROOT}/show-folder-size-setup"
 
+run "sort key: numeric ordering, and that it draws as nothing" \
+    python3 "${HERE}/test_sort_key.py"
+
 run "ABI selection (no network needed)" \
     python3 "${HERE}/test_abi_selection.py"
 

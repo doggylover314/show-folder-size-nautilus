@@ -8,11 +8,12 @@ Sizes are computed on background threads and cached on disk, so browsing never
 blocks and a folder measured once stays instant across restarts. While a
 folder is being measured the column reads `Calculating...`.
 
-> **Status: v1.0.0.** Install the `.deb` by double-clicking it, run
-> `nautilus -q`, and the column is there — it enables itself on first load.
-> Measurement uses the same GIO call as Nautilus' Properties window, and
-> sizes are formatted exactly like the built-in Size column. Folder sizes are
-> re-indexed at each login so they stay ready; see
+> **Status: v1.1.0.** Install the `.deb` or the `.rpm` by double-clicking it,
+> run `nautilus -q`, and the column is there — it enables itself on first
+> load. Measurement uses the same GIO call as Nautilus' Properties window, and
+> sizes are formatted exactly like the built-in Size column. **Clicking the
+> header sorts by size** — see [Sorting by size](#sorting-by-size). Folder
+> sizes are re-indexed at each login so they stay ready; see
 > [Indexing at login](#indexing-at-login).
 > See [Known issues](#known-issues) before installing.
 
@@ -22,20 +23,31 @@ folder is being measured the column reads `Calculating...`.
 
 | | |
 |---|---|
-| Nautilus | 46 (libnautilus-extension **4.0**) |
-| Package | `nautilus-python` — `python3-nautilus` on Debian/Ubuntu, `nautilus-python` on Fedora/Arch |
+| Nautilus | 3.x – 50. The extension asks which `libnautilus-extension` ABI is installed (3.0, 4.0 or 4.1) and uses the newest, so it is not pinned to one |
+| Package | `nautilus-python` — `python3-nautilus` on Debian/Ubuntu, `nautilus-python` on Fedora, `python-nautilus` on Arch |
 | Python | 3.8+, stdlib only |
 | Dependencies | none beyond PyGObject, which nautilus-python already pulls in |
+| Packaged for | Debian/Ubuntu (`.deb`) and Fedora (`.rpm`); any other distro by copying one file |
 
-Newer GNOME releases (47+) are **not yet verified** — see
-[GNOME version support](#gnome-version-support).
+Only Nautilus 46 has been used as a desktop. On 3.0 and 4.1 the registration
+path is tested against the real shared libraries but nobody has watched the
+column appear — see [GNOME version support](#gnome-version-support) for
+exactly what that covers.
 
 ## Install
 
-**Double-click the `.deb`.** GNOME Software opens, you press Install, then:
+**Double-click the `.deb`** (Debian, Ubuntu, Mint, Pop!\_OS) **or the
+`.rpm`** (Fedora Workstation). GNOME Software opens, you press Install, then:
 
 ```bash
 nautilus -q   # closes open windows; next launch loads the extension
+```
+
+On Fedora the terminal equivalent is:
+
+```bash
+sudo dnf install ./show-folder-size-nautilus-1.1.0-1.fc42.noarch.rpm
+nautilus -q
 ```
 
 Switch to **List View** and the column is already there. It enables itself the
@@ -44,8 +56,8 @@ stays unticked.
 
 ### Or from the apt repository (recommended, and it keeps itself updated)
 
-> **Not published yet.** The repository goes live with the 1.0.0 release;
-> until then these commands will fail on the signing key, and the
+> **Not published yet.** The repository goes live with the first published
+> release; until then these commands will fail on the signing key, and the
 > [releases page](https://github.com/doggylover314/show-folder-size-nautilus/releases)
 > is the way in. Building it yourself from a clone works today:
 > `./build-apt-repo.sh --key <YOURKEY>`.
@@ -75,7 +87,54 @@ around, plus a privileged helper to do the installing. Your machine already
 has a well-tested, signed, unattended-capable update system, so this uses it.
 `unattended-upgrades` and GNOME Software pick it up with no further setup.
 
-Or without the package:
+### Fedora Workstation
+
+The `.rpm` installs the same files the `.deb` does — the extension, both
+commands, the menu entry and icon, the AppStream metainfo, the gschema
+override that turns the column on, and the `/etc/xdg/autostart` entry for
+login indexing. Everything that is not packaging-format-specific lives in
+`data/` and is shared by both builds, so they cannot drift apart.
+
+Build one from a clone:
+
+```bash
+sudo dnf install rpm-build          # once
+./build-rpm.sh
+sudo dnf install dist/show-folder-size-nautilus-*.noarch.rpm
+nautilus -q
+```
+
+Three things differ from the `.deb`, all of them in
+[`fedora/show-folder-size-nautilus.spec`](fedora/show-folder-size-nautilus.spec)
+with the reasoning next to them:
+
+- **No debconf, so no question at install time.** The cache location ships as
+  `%config(noreplace) /etc/show-folder-size-nautilus.conf` instead, which is
+  the RPM way of saying "an admin's edit survives an upgrade". Everything
+  else is in **Folder Size Setup**, same as on a double-click `.deb` install.
+- **No `Conflicts: nautilus-total-size`.** That old name only ever existed as
+  a `.deb`, so there is nothing on a Fedora machine to conflict with.
+- **The `%post` scriptlets are belt and braces.** Fedora's own file triggers
+  already rebuild the schema, desktop and icon caches. The recompile on
+  *uninstall* is not redundant anywhere, though: without it the compiled
+  schema cache keeps serving the override after the file is gone, and
+  "Total Size" stays in every account's default column list.
+
+> **What has actually been verified, precisely.** The package builds, its
+> contents and dependencies are what they should be, `desktop-file-validate`
+> passes both `.desktop` files and `appstreamcli validate` passes the
+> metainfo. Fedora's own package names, paths and library directory were
+> checked against the current `nautilus`, `nautilus-python`, `gtk4` and
+> `libadwaita` spec files rather than guessed at. **Nobody has yet installed
+> this on a running Fedora Workstation** — the same distinction the
+> [GNOME version support](#gnome-version-support) table makes. If you do, a
+> report either way is genuinely useful.
+>
+> There is no COPR repository yet, so on Fedora the `.rpm` is a download
+> rather than something that updates itself. That is the one thing the
+> apt side has and this does not.
+
+Or without any package at all, on any distro:
 
 ```bash
 mkdir -p ~/.local/share/nautilus-python/extensions
@@ -94,7 +153,8 @@ The `.deb` installs a small window — **Folder Size Setup**, or
 in your session:
 
 - where sizes are cached, or switching on-disk caching off entirely
-- turning the Total Size column on and off
+- turning the Total Size column on and off, and whether its header sorts by
+  size or alphabetically
 - pre-indexing whole drives, with progress and a Stop button that keeps what
   it already measured
 - whether folder sizes are re-indexed at login, and which folders that covers
@@ -128,6 +188,9 @@ put the cache, and records the answer as the system-wide default in
 - Regular files are left blank — Nautilus' Size column already covers them.
 - Results are cached on disk keyed by `(path, directory mtime)`, so
   re-entering an unchanged folder is instant, including after a restart.
+- Each value carries a fixed-width, zero-width sort key in front of the text,
+  which is what makes the header sort by size — see
+  [Sorting by size](#sorting-by-size).
 
 ### Correctness details
 
@@ -149,6 +212,64 @@ with it in v1.0.0 by measuring, not by assuming.
   on sparse files. Directory inodes are not counted.
 - Unreadable files are skipped rather than aborting the whole total.
 
+## Sorting by size
+
+Click the **Total Size** header and the list sorts by size, biggest or
+smallest first. Up to v1.0.0 it sorted the *text*, so `9.9 kB` came before
+`1.2 GB` and the column was no use for the thing most people want it for.
+This README called that unfixable. It was not; it needed a closer look at what
+Nautilus actually does.
+
+Nautilus has no sort-key hook for extension columns — that part was true, and
+still is. What it has instead is this, in `nautilus_file_compare_for_sort_by_attribute_q`:
+
+```c
+/* it is a normal attribute, compare by strings */
+...
+result = strcmp (value_1, value_2);
+```
+
+and the cell draws the same string, unmodified:
+
+```c
+string = nautilus_file_get_string_attribute_q (file, self->attribute_q);
+gtk_label_set_text (self->label, string);
+```
+
+Sort key and label are one string, and the comparison is on **bytes**, not a
+locale collation. So each value now carries a fixed-width key in front of the
+part you read, built from four characters that occupy no space when drawn:
+U+2060 WORD JOINER, U+2061 FUNCTION APPLICATION, U+2062 INVISIBLE TIMES and
+U+2063 INVISIBLE SEPARATOR. Four digits, two bits each, 32 of them — the whole
+unsigned 64-bit range, so there is no folder big enough to sort wrongly.
+
+The details worth knowing:
+
+- **It is not a trick that might stop working.** `strcmp` is what the Nautilus
+  source does in 3.36.3, 42.6, 46.0, 48.0, 50.2 and `main`, on both the GTK3
+  tree-view path and the GTK4 column-view one. There is no version-conditional
+  code for it, because there is no version that differs.
+- **The characters were measured, not assumed.** All four are
+  `Default_Ignorable_Code_Point`, which HarfBuzz hides, *and* they are in
+  Pango's own `pango_is_zero_width()` list, which is what its fallback shaper
+  uses when there is no font to shape with — so neither path can turn one into
+  a visible box. `tests/test_sort_key.py` lays each one out through PangoCairo
+  and asserts the ink and logical extents do not move. That test is how
+  U+034F and U+FE00 were rejected: both are default-ignorable, both drew a
+  dotted circle.
+- **Non-directional and non-joining.** Most of the other zero-width characters
+  Pango knows about are bidi controls or joiners. A bidi control in front of
+  every cell is a good way to reorder somebody's right-to-left file list.
+- **The cost is 96 bytes per folder** — three UTF-8 bytes times 32 — which is
+  less than the path Nautilus is already holding for the same row. Files get
+  an empty cell and no key at all.
+- **Folders still being measured sort as zero**, so sorting descending fills
+  in from the top as answers arrive rather than burying them under a screenful
+  of `Calculating...`.
+- **If it ever renders wrongly, turn it off**: the *Sort by size when the
+  header is clicked* switch in **Folder Size Setup**, or `numeric_sort=0` in
+  the config. The column then sorts alphabetically again, exactly as before.
+
 ## Is it safe? (what it writes)
 
 Up to v0.2.2 this extension wrote nothing at all, and that claim was the
@@ -163,7 +284,7 @@ all of it safe to delete:
 | `~/.cache/show-folder-size-nautilus/index.lock` | while indexing (zero bytes) | not indexing, or no cache directory |
 | `~/.config/show-folder-size-nautilus-column-added` | once, ever | creating the file yourself first |
 | the dconf key `org.gnome.nautilus.list-view default-visible-columns` | once, ever, alongside the marker above | the same marker file |
-| `~/.config/show-folder-size-nautilus.conf` | only when you press Save in the setup window | not pressing it |
+| `~/.config/show-folder-size-nautilus.conf` | when you press Save in the setup window, or flip its sorting switch | not doing either |
 | `~/.config/autostart/…ShowFolderSizeIndex.desktop` | only when you change the login setting | not changing it |
 | `~/.config/environment.d/60-show-folder-size-nautilus.conf` | only if you switch on the session-environment option | leaving it off, which is the default |
 
@@ -313,7 +434,9 @@ by default.
 
 - **Point them at the apt repository lines above**, not at a `.deb` download.
   A `.deb` is a one-off that never updates; the repository means they get
-  fixes without doing anything.
+  fixes without doing anything. Fedora has no equivalent here yet — a COPR
+  repository is the thing that would give `.rpm` users the same, and it is not
+  built. Until it is, say so rather than implying the `.rpm` self-updates.
 - The `.deb` renders properly in GNOME Software (icon, description, screenshot
   metadata), so "download it and double-click" works for people who would
   rather not touch a terminal.
@@ -345,7 +468,9 @@ cache_dir=
 ```
 
 The same two files also hold `autostart_dirs=`, which is what the login run
-indexes — see [Indexing at login](#indexing-at-login). Both files are plain
+indexes — see [Indexing at login](#indexing-at-login) — and `numeric_sort=`,
+where `0` turns off the sort key and puts the column back to sorting
+alphabetically. Both files are plain
 `key=value`; `#` starts a comment, the user file wins over `/etc`, and a key
 that is absent is not the same as a key that is present and empty (absent
 means "nobody chose", empty means "chose nothing").
@@ -373,9 +498,11 @@ total stays cached until its own mtime changes. `Ctrl+R` forces a recount.
   that belongs to your account, not to the package, so `apt purge` cannot take
   it back. Untick it, or run
   `gsettings reset org.gnome.nautilus.list-view default-visible-columns`.
-- **Sorting is alphabetical, not numeric.** Clicking the header puts `9.9 KB`
-  before `1.2 GB`. The extension API exposes no sort-key hook, so this can't be
-  fixed from inside an extension.
+- **Sorting works by prefixing each cell with invisible characters**, because
+  Nautilus offers extensions no other way to influence it — see
+  [Sorting by size](#sorting-by-size). Everything the extension can check
+  about that is checked, but if a font or toolkit somewhere does render them,
+  the switch in **Folder Size Setup** turns it off.
 - **Deep changes are only caught in watched directories** — see
   [Filesystem monitoring](#filesystem-monitoring) for the bound and why.
 - **Live measurement crosses mount points**, so a folder containing a mounted
@@ -471,7 +598,10 @@ Delete it when you're done.
 - [x] Column enabled automatically on first run
 - [x] Setup window for cache location and drive indexing
 - [x] Indexing at login, full once and incremental after, off-switch per user
+- [x] Clicking the header sorts by size, not by text
+- [x] An `.rpm` for Fedora Workstation, built from the same files as the `.deb`
 - [ ] Verified GNOME 47+ support
+- [ ] Someone running the `.rpm` on a real Fedora Workstation
 
 ## License
 

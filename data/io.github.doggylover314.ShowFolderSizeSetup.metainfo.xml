@@ -70,6 +70,19 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.0" date="2026-09-10">
+      <description>
+        <p>
+          Clicking the Total Size header now sorts by size. It used to sort
+          the text, so 9.9 kB came before 1.2 GB and the column was no help
+          for the thing people use it for.
+        </p>
+        <p>
+          There is an RPM build as well as the .deb, so Fedora Workstation
+          installs the same way the rest of the desktop does.
+        </p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-08-22">
       <description>
         <p>

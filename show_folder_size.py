@@ -88,6 +88,11 @@ Where the cache lives, in order of precedence:
 Setting any of them to the empty string disables the on-disk cache entirely:
 nothing is written, and sizes are remembered only for the current session.
 
+The same config files also hold:
+
+  numeric_sort=0    turn off the invisible sort key, so the column sorts
+                    alphabetically again.  On by default.  See "sorting".
+
 WHY IT IS BUILT THIS WAY (three bugs' worth of hard-won detail)
 --------------------------------------------------------------
 * Sizes are formatted with GLib.format_size(), which is exactly what Nautilus
@@ -174,9 +179,12 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
   levels below a folder nobody is watching and its cached total stays stale
   until the folder's own mtime changes or the cache entry ages out.  Reload
   the window (Ctrl+R) to force a recount.
-* Nautilus sorts columns as plain strings, so clicking the "Total Size" header
-  sorts alphabetically ("9.9 kB" before "1.2 GB"), not numerically.  The
-  extension API has no sort-key hook, so this cannot be fixed from here.
+* Clicking the "Total Size" header sorts numerically, but not because the
+  extension API offers a way to say so -- it does not.  Nautilus compares the
+  strings an extension gives it with strcmp() and draws those same strings, so
+  each value is prefixed with a fixed-width key made of characters that take
+  up no space when drawn.  See "sorting" below for the whole story, including
+  how to switch it off (numeric_sort=0) if it ever renders wrongly.
 * Totals are apparent size (sum of file sizes), not allocated blocks, so they
   differ slightly from `du` on sparse files, and hard-linked files are counted
   once per link rather than once per inode, so they can exceed `du` on trees
@@ -329,12 +337,13 @@ NAUTILUS_ABI = _pick_nautilus_abi()
 
 if NAUTILUS_ABI is None:
     raise ImportError(
-        "no libnautilus-extension typelib found. Install nautilus-python "
-        "(python3-nautilus on Debian/Ubuntu).")
+        "no libnautilus-extension typelib found. Install nautilus-python: "
+        "python3-nautilus on Debian/Ubuntu, nautilus-python on Fedora and "
+        "openSUSE, python-nautilus on Arch.")
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -628,6 +637,128 @@ def format_size(num_bytes):
     (1024 -> '1.0 kB', 1 GiB -> '1.1 GB').
     """
     return GLib.format_size(num_bytes)
+
+
+# --- sorting ----------------------------------------------------------------
+#
+# Clicking the "Total Size" header used to sort the column alphabetically, so
+# "9.9 kB" came before "1.2 GB" and the one thing people want this column for
+# -- finding the big folders -- did not work.  The README called it unfixable.
+# It is not; it just needs the reason it happens.
+#
+# Nautilus sorts an extension column by comparing the STRINGS the extension
+# handed it, with plain strcmp():
+#
+#     /* it is a normal attribute, compare by strings */
+#     result = nautilus_file_compare_for_sort_internal (...);
+#     if (result == 0) { ... result = strcmp (value_1, value_2); }
+#         -- src/nautilus-file.c, nautilus_file_compare_for_sort_by_attribute_q
+#
+# and it DISPLAYS the same string, unmodified, in the cell:
+#
+#     string = nautilus_file_get_string_attribute_q (file, self->attribute_q);
+#     gtk_label_set_text (self->label, string);
+#         -- src/nautilus-label-cell.c, update_label()
+#
+# Checked in the Nautilus source for 3.36.3, 42.6, 46.0, 48.0, 50.2 and main:
+# it is strcmp in all six, and it is strcmp on the GTK3 tree-view path
+# (nautilus-list-model.c) as well as the GTK4 column-view one.  There is no
+# sort-key property on NautilusColumn in any of those releases either -- the
+# property list is name, attribute, attribute_q, label, description, xalign,
+# default-sort-order, visible, and nothing has been added since 3.36.
+#
+# So sort key and display text are the same string, and the comparison is a
+# BYTE comparison rather than a locale collation.  That is the opening: put a
+# fixed-width big-endian key in front of the visible text, built out of
+# characters that occupy no space when drawn, and byte order becomes numeric
+# order while the cell still reads "1.2 GB".
+#
+# The digits are U+2060 WORD JOINER, U+2061 FUNCTION APPLICATION, U+2062
+# INVISIBLE TIMES and U+2063 INVISIBLE SEPARATOR.  They were picked, and then
+# measured, against three requirements:
+#
+#   * Pango draws them as nothing.  All four are Default_Ignorable_Code_Point,
+#     which HarfBuzz hides, AND they are in pango_is_zero_width(), which is
+#     what Pango's fallback shaper uses when there is no font to shape with --
+#     so neither path can turn one into a visible box.  Measured, not assumed:
+#     tests/test_sort_key.py lays each one out through PangoCairo and asserts
+#     both the logical and the ink extents are unchanged.  That test is how
+#     U+034F COMBINING GRAPHEME JOINER and U+FE00 VARIATION SELECTOR-1 were
+#     rejected -- both are default-ignorable, and both drew a dotted circle.
+#   * They carry no direction and no joining behaviour.  The other zero-width
+#     characters Pango knows about are mostly bidi controls (U+202A-202E,
+#     U+2066-2069) or joiners (U+200C, U+200D); a bidi control in front of
+#     every cell is a good way to reorder somebody's right-to-left file list.
+#   * UTF-8 preserves code point order, so U+2060 < U+2061 < U+2062 < U+2063
+#     bytewise, which is what makes them usable as ordered digits at all.
+#
+# Four digits is two bits each, so 32 of them cover the whole unsigned 64-bit
+# range exactly -- no clamping, no folder large enough to sort wrongly.  The
+# cost is 96 bytes of UTF-8 in front of each folder's value, which is less
+# than the path Nautilus is already holding for the same row.  Files still get
+# an empty string and no key at all.
+#
+# If this ever does render wrongly somewhere, `numeric_sort=0` in the config
+# turns it off and the column goes back to sorting alphabetically.  That is
+# the escape hatch, and it is why the key is built in one function.
+SORT_DIGITS = "\u2060\u2061\u2062\u2063"
+SORT_KEY_DIGITS = 32                     # 2 bits each: the full uint64 range
+SORT_KEY_MAX = (1 << (2 * SORT_KEY_DIGITS)) - 1
+NUMERIC_SORT_KEY = "numeric_sort"
+
+
+def _numeric_sort_enabled():
+    """Whether to prefix values with a sort key.  On unless switched off."""
+    configured = read_config_value(NUMERIC_SORT_KEY)
+    if configured is None:
+        return True
+    return configured.strip().lower() not in ("0", "no", "off", "false", "")
+
+
+NUMERIC_SORT = _numeric_sort_enabled()
+
+
+def sort_key(num_bytes):
+    """Fixed-width, invisible, big-endian base-4 encoding of `num_bytes`.
+
+    Fixed width matters as much as the ordering does: strcmp compares
+    position by position, so a shorter key would let a small number's key run
+    out early and lose to a longer one.  Every key here is exactly
+    SORT_KEY_DIGITS long, so digit N of one key is always compared against
+    digit N of the other.
+    """
+    value = max(0, min(int(num_bytes), SORT_KEY_MAX))
+    digits = []
+    for _ in range(SORT_KEY_DIGITS):
+        digits.append(SORT_DIGITS[value & 3])
+        value >>= 2
+    digits.reverse()
+    return "".join(digits)
+
+
+def cell_value(num_bytes, text=None):
+    """What to hand Nautilus: the sort key, then what the user reads.
+
+    `text` overrides the rendered half, which is how "Calculating..." gets a
+    key too.  A folder still being measured sorts as zero, so descending order
+    -- looking for the biggest folders, which is the reason to sort this
+    column at all -- fills in from the top as answers arrive instead of
+    burying the answers under a screenful of placeholders.
+    """
+    if text is None:
+        text = format_size(num_bytes)
+    if not NUMERIC_SORT:
+        return text
+    return sort_key(num_bytes) + text
+
+
+def visible_text(value):
+    """The user-visible half of a cell value, with any sort key stripped.
+
+    Only used by the self test and by tests; nothing in the extension needs
+    to reverse this, because the byte counts are what is cached, not strings.
+    """
+    return value.lstrip(SORT_DIGITS)
 
 
 def _measure_with_gio(path, cancellable):
@@ -1127,9 +1258,9 @@ class ShowFolderSizeColumn(GObject.GObject,
             # any pending retry can stop.
             self._awaiting_reread.discard(path)
             self._watch(path)
-            return (format_size(cached[1]) if cached[1] >= 0 else ""), None, 0
+            return (cell_value(cached[1]) if cached[1] >= 0 else ""), None, 0
 
-        return PENDING_TEXT, path, mtime_ns
+        return cell_value(0, PENDING_TEXT), path, mtime_ns
 
     # -- background work -----------------------------------------------------
 
@@ -1287,7 +1418,7 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._schedule_save()
         self._watch(path)
 
-        text = format_size(num_bytes) if num_bytes >= 0 else ""
+        text = cell_value(num_bytes) if num_bytes >= 0 else ""
         self._queued_at.pop(path, None)
         self._requeues.pop(path, None)
         # A re-queued job can land twice.  The second arrival finds no
@@ -1546,4 +1677,11 @@ if __name__ == "__main__":
         # both are certain to agree -- harmless here, but the same idiom in
         # directory_size() would silently prefer the wrong number.
         shown = walk_bytes if gio_bytes is None else gio_bytes
-        print("  column shows : %s" % format_size(shown))
+        cell = cell_value(shown)
+        print("  column shows : %s" % visible_text(cell))
+        print("  sorts as     : %s"
+              % ("%d invisible characters in front of that, so the header"
+                 " sorts numerically" % (len(cell) - len(visible_text(cell)))
+                 if NUMERIC_SORT else
+                 "alphabetically -- numeric_sort is switched off in the"
+                 " config"))

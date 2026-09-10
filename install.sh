@@ -18,9 +18,19 @@ if [[ ! -f "${SRC}" ]]; then
     exit 1
 fi
 
-if ! ls /usr/lib/*/nautilus/extensions-4/libnautilus-python.so >/dev/null 2>&1; then
+# Both spellings of the library directory, because they are both real:
+# Debian and Ubuntu use a multiarch triplet (/usr/lib/x86_64-linux-gnu),
+# Fedora, openSUSE and Arch use /usr/lib64 or plain /usr/lib. A glob written
+# for one of them silently warns on the others -- /usr/lib/*/... does not
+# match /usr/lib64/..., so this used to tell every Fedora user that a package
+# they had just installed was missing.
+if ! ls /usr/lib/*/nautilus/extensions-4/libnautilus-python.so \
+       /usr/lib64/nautilus/extensions-4/libnautilus-python.so \
+       /usr/lib/nautilus/extensions-4/libnautilus-python.so \
+       >/dev/null 2>&1; then
     echo "warning: libnautilus-python.so (extensions-4) not found." >&2
-    echo "         Install nautilus-python first - see INSTALL.md." >&2
+    echo "         Install it first - python3-nautilus on Debian/Ubuntu," >&2
+    echo "         nautilus-python on Fedora. See INSTALL.md." >&2
 fi
 
 mkdir -p "${DEST}"

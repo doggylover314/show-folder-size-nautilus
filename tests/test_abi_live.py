@@ -93,7 +93,7 @@ def check(label, fn):
 
 
 # Kept deliberately identical to the extension's own values.
-COLUMN_ID = "ShowFolderSize::total_size"
+COLUMN_ID = "NautilusPython::total_size"   # == COLUMN_ID in the extension
 ATTRIBUTE = "total_size"
 LABEL = "Total Size"
 DESCRIPTION = "Recursive size of a folder's contents"

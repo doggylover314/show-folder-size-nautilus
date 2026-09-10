@@ -4,6 +4,110 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-10
+
+Clicking the **Total Size** header now sorts by size, and there is an `.rpm`
+so Fedora Workstation installs the same way everything else on it does.
+
+### Added
+- **Sorting by size.** The header used to sort the text, so `9.9 kB` came
+  before `1.2 GB` and the column was no use for finding big folders — which is
+  what the column is for. This changelog and the README both called that
+  unfixable, on the grounds that the extension API has no sort-key hook.
+
+  That much is true and still is. What is also true, and was never checked, is
+  what Nautilus does *instead*: it compares extension columns with `strcmp()`
+  on the very string it draws in the cell.
+
+  ```c
+  /* it is a normal attribute, compare by strings */
+  result = strcmp (value_1, value_2);          /* nautilus-file.c */
+  ...
+  string = nautilus_file_get_string_attribute_q (file, self->attribute_q);
+  gtk_label_set_text (self->label, string);    /* nautilus-label-cell.c */
+  ```
+
+  Sort key and label are one string, and the comparison is on bytes rather
+  than a locale collation. So each value now carries a fixed-width key in
+  front of the visible text, built from four characters that take up no space
+  when drawn: U+2060, U+2061, U+2062 and U+2063. Two bits each, 32 digits, the
+  whole unsigned 64-bit range — no clamping and no folder big enough to sort
+  wrongly.
+
+  Checked in the Nautilus source for 3.36.3, 42.6, 46.0, 48.0, 50.2 and
+  `main`: `strcmp` in all six, on the GTK3 tree-view path as well as the GTK4
+  column-view one, and no sort-key property has appeared on `NautilusColumn`
+  in any of them.
+
+  The characters were chosen by measurement, not by reading a table. All four
+  are `Default_Ignorable_Code_Point`, which HarfBuzz hides, *and* are in
+  Pango's `pango_is_zero_width()` list, which its fallback shaper uses when
+  there is no font to shape with — so neither path can turn one into a visible
+  box. `tests/test_sort_key.py` lays each one out through PangoCairo and
+  asserts the ink and logical extents do not move. That test is what rejected
+  U+034F COMBINING GRAPHEME JOINER and U+FE00 VARIATION SELECTOR-1: both are
+  default-ignorable, both drew a dotted circle. Bidi controls and joiners were
+  ruled out on principle — a bidi control in front of every cell is a good way
+  to reorder somebody's right-to-left file list.
+
+  A folder still being measured sorts as zero, so sorting descending fills in
+  from the top as answers arrive instead of burying them under a screenful of
+  `Calculating...`. Files keep an empty cell and carry no key.
+
+  Cost: 96 bytes of UTF-8 per folder, which is less than the path Nautilus is
+  already holding for the same row.
+- **`numeric_sort=0`** in either config file, and a *Sort by size when the
+  header is clicked* switch in **Folder Size Setup**, turn the key off and put
+  the column back to sorting alphabetically. The escape hatch is in the window
+  rather than only in a file because the one thing that could go wrong with
+  this is something the user sees and nobody else can reproduce.
+- **An `.rpm`, and `build-rpm.sh` to build it.** Fedora Workstation gets the
+  same payload as the `.deb`: the extension, both commands, the menu entry and
+  icon, the AppStream metainfo, the gschema override that turns the column on,
+  and the `/etc/xdg/autostart` entry for login indexing.
+
+  Three things genuinely differ, each with the reasoning next to it in
+  `fedora/show-folder-size-nautilus.spec`: no debconf, so the cache location
+  ships as a `%config(noreplace)` file instead of being asked for; no
+  `Conflicts` on `nautilus-total-size`, which only ever existed as a `.deb`;
+  and `%post` scriptlets that are mostly redundant next to Fedora's own file
+  triggers — except the schema recompile on *uninstall*, which is redundant
+  nowhere, because the compiled cache keeps serving the override after the
+  file is gone and would leave "Total Size" in every account's default column
+  list.
+
+  `build-rpm.sh` refuses to build on version drift, the same way `build-deb.sh`
+  does, and now checks two numbers rather than one: the AppStream metainfo and
+  the spec's own fallback `Version`.
+
+### Changed
+- **Packaging assets moved to `data/`.** The `.desktop` entries, the icon, the
+  AppStream metainfo and the gschema override are shared by both package
+  builds, so they now live outside `debian/`, which keeps only what dpkg
+  itself consumes. Copying them into a `fedora/` directory would have
+  guaranteed the two drifted.
+- `install.sh` and the extension's own import error now look for
+  `libnautilus-python.so` in `/usr/lib64` and `/usr/lib` as well as under a
+  multiarch triplet. The old glob was `/usr/lib/*/nautilus/…`, which does not
+  match `/usr/lib64/nautilus/…` — so every Fedora user was told that a package
+  they had just installed was missing.
+- Messages that named a missing package now name it per distro rather than
+  assuming Debian: `python3-nautilus` / `nautilus-python` / `python-nautilus`,
+  and `gir1.2-gtk-4.0` / `gtk4`.
+- `INSTALL.md`'s version-compatibility section said the extension targets
+  libnautilus-extension 4.0 and pins it with `gi.require_version`, and that
+  Nautilus 42 was unsupported. None of that has been true since 1.0.0, which
+  replaced the pin with ABI discovery. It now carries the same table the
+  README does.
+
+### Fixed
+- `tests/test_abi_live.py` claimed to use "the extension's own values" and
+  then registered its probe column under `ShowFolderSize::total_size`, while
+  the extension and the gschema override both use
+  `NautilusPython::total_size`. The test passed either way — nothing compares
+  them — but it was evidence for a slightly different program than the one
+  being shipped.
+
 ## [1.0.0] - 2026-08-22
 
 First stable release. Sizes now keep themselves up to date, and the three
@@ -531,7 +635,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.0
 [1.0.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.0.0
 [0.6.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.6.0
 [0.5.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.5.0
