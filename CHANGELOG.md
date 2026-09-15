@@ -61,6 +61,14 @@ so Fedora Workstation installs the same way everything else on it does.
   the column back to sorting alphabetically. The escape hatch is in the window
   rather than only in a file because the one thing that could go wrong with
   this is something the user sees and nobody else can reproduce.
+- **`build-dnf-repo.sh`**, the Fedora counterpart of `build-apt-repo.sh`. It
+  signs each `.rpm` in place with `rpmsign` and signs `repomd.xml`, because
+  `gpgcheck=1` and `repo_gpgcheck=1` check different things and doing only one
+  leaves either every package or the whole index unverified. It refuses to
+  finish if either signature is missing.
+
+  Both repositories can share one Pages site: apt owns `dists/` and `pool/`,
+  dnf owns `rpm/`.
 - **An `.rpm`, and `build-rpm.sh` to build it.** Fedora Workstation gets the
   same payload as the `.deb`: the extension, both commands, the menu entry and
   icon, the AppStream metainfo, the gschema override that turns the column on,
@@ -85,6 +93,10 @@ so Fedora Workstation installs the same way everything else on it does.
   extension lands on disk, nautilus silently refuses to load it, and the one
   line explaining why has already scrolled past. Nobody reads a warning that
   did not stop anything.
+
+  It also warns when a packaged copy already exists in `/usr/share`, since
+  nautilus-python reads that directory and the user one and registers what it
+  finds in both, so two copies draw two Total Size columns.
 
   It now finds your package manager and runs it. Either the install finishes
   or the script fails, loudly and with a non-zero exit, having copied nothing.

@@ -295,6 +295,35 @@ Watch what it did:
 journalctl --user -b | grep show-folder-size-index
 ```
 
+## 7b. Keeping it updated
+
+A package you downloaded and installed is a one-off. Nothing goes looking for
+a newer one, so it stays at whatever version you installed until you install
+another by hand. That applies to both the `.deb` and the `.rpm`.
+
+Adding a repository is what changes that. Then the machine's own update
+process handles it, like every other package:
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt upgrade
+
+# Fedora
+sudo dnf upgrade
+```
+
+See the README for the lines that add each repository. Neither is published
+yet; `./build-apt-repo.sh` and `./build-dnf-repo.sh` build them from a clone.
+
+Installing from a clone with `./install.sh` is its own thing again: that is a
+copy, so `git pull && ./install.sh` is the upgrade.
+
+**Do not mix the two.** `install.sh` puts the extension in your home
+directory, the packages put it in `/usr/share`, and nautilus-python reads both
+and registers what it finds in each. Two copies means **two Total Size
+columns**. `install.sh` warns when it spots a packaged copy; the fix either
+way is to remove one of them.
+
 ## 8. Version compatibility
 
 The extension is not pinned to one extension ABI. It asks

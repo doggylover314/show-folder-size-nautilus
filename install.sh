@@ -146,6 +146,22 @@ else
         "Please open an issue with your distro and 'nautilus --version'."
 fi
 
+# nautilus-python scans the user directory AND the system ones, imports every
+# .py it finds in each, and appends whatever providers it finds to one list.
+# It does not notice that the same module name turned up twice. The result is
+# the provider registered twice and TWO "Total Size" columns drawn, which is
+# the exact symptom this project already shipped once, in the 0.5.0 rename.
+# So say something before creating the second copy rather than after.
+for system_copy in /usr/share/nautilus-python/extensions/"${FILE}"                    /usr/local/share/nautilus-python/extensions/"${FILE}"; do
+    [[ -e "${system_copy}" ]] || continue
+    step "Heads up: ${FILE} is already installed system-wide"
+    echo "    ${system_copy}"
+    echo "    Two copies means nautilus loads it twice and draws TWO Total Size"
+    echo "    columns. Remove the package (apt remove / dnf remove"
+    echo "    show-folder-size-nautilus) if you want this user copy instead,"
+    echo "    or run ./install.sh --uninstall to keep the packaged one."
+done
+
 step "Installing the extension"
 mkdir -p "${DEST}"
 cp -v "${SRC}" "${DEST}/"

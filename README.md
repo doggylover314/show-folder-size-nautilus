@@ -87,6 +87,31 @@ around, plus a privileged helper to do the installing. Your machine already
 has a well-tested, signed, unattended-capable update system, so this uses it.
 `unattended-upgrades` and GNOME Software pick it up with no further setup.
 
+### Or from the dnf repository (recommended on Fedora, same reason)
+
+> **Not published yet**, exactly like the apt one. `./build-dnf-repo.sh --key
+> <YOURKEY>` builds it from a clone today.
+
+```bash
+sudo curl -fsSL -o /etc/yum.repos.d/show-folder-size-nautilus.repo \
+  https://doggylover314.github.io/show-folder-size-nautilus/rpm/show-folder-size-nautilus.repo
+```
+
+```bash
+sudo dnf install show-folder-size-nautilus
+```
+
+dnf shows the signing key's fingerprint and asks before importing it the first
+time. After that it upgrades with everything else, and `dnf-automatic` picks it
+up with no further setup.
+
+Both repositories can live on one Pages site: apt owns `dists/` and `pool/` at
+the root, dnf owns everything under `rpm/`. Two signatures are needed on the
+dnf side, and skipping either is a silent half-measure — `repomd.xml.asc` is
+what `repo_gpgcheck=1` verifies, and the signature inside each `.rpm` is what
+`gpgcheck=1` verifies. `build-dnf-repo.sh` does both and refuses to finish if
+either is missing.
+
 ### Fedora Workstation
 
 The `.rpm` installs the same files the `.deb` does — the extension, both
@@ -130,9 +155,8 @@ with the reasoning next to them:
 > [GNOME version support](#gnome-version-support) table makes. If you do, a
 > report either way is genuinely useful.
 >
-> There is no COPR repository yet, so on Fedora the `.rpm` is a download
-> rather than something that updates itself. That is the one thing the
-> apt side has and this does not.
+> A one-off `.rpm` download never updates itself. Use the dnf repository
+> above if you want it upgrading with the rest of the system.
 
 Or from a clone, on any distro:
 
@@ -448,11 +472,9 @@ by default.
 
 ## Telling other people about it
 
-- **Point them at the apt repository lines above**, not at a `.deb` download.
-  A `.deb` is a one-off that never updates; the repository means they get
-  fixes without doing anything. Fedora has no equivalent here yet — a COPR
-  repository is the thing that would give `.rpm` users the same, and it is not
-  built. Until it is, say so rather than implying the `.rpm` self-updates.
+- **Point them at the repository lines above**, apt or dnf, not at a `.deb`
+  or `.rpm` download. A downloaded package is a one-off that never updates;
+  a repository means they get fixes without doing anything.
 - The `.deb` renders properly in GNOME Software (icon, description, screenshot
   metadata), so "download it and double-click" works for people who would
   rather not touch a terminal.
