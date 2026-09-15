@@ -81,10 +81,14 @@ so Fedora Workstation installs the same way everything else on it does.
   the spec's own fallback `Version`.
 
 - **`install.sh` installs `nautilus-python` for you.** It used to print a
-  warning and carry on, which left the extension sitting on disk doing
-  nothing, with no error anywhere to explain why. It now finds your package
-  manager, shows the exact command and asks before running it. `--yes` skips
-  the question, `--skip-deps` leaves the package manager alone.
+  warning and copy the file anyway, which is the worst of both outcomes: the
+  extension lands on disk, nautilus silently refuses to load it, and the one
+  line explaining why has already scrolled past. Nobody reads a warning that
+  did not stop anything.
+
+  It now finds your package manager and runs it. Either the install finishes
+  or the script fails, loudly and with a non-zero exit, having copied nothing.
+  `--skip-deps` copies the file and leaves the package manager alone.
 
   The `.deb` and `.rpm` always handled this themselves (`Depends:
   python3-nautilus` and `Requires: nautilus-python`), so `apt install ./x.deb`

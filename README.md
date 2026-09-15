@@ -143,10 +143,10 @@ cd show-folder-size-nautilus
 nautilus -q
 ```
 
-`install.sh` copies one file, and offers to install `nautilus-python` first if
-it is missing. It shows you the command and waits for an answer rather than
-reaching for `sudo` on its own; `--yes` skips the question, `--skip-deps`
-leaves the package manager alone.
+`install.sh` installs `nautilus-python` if it is missing, then copies one file.
+It either finishes the job or stops with an error; it will not leave the
+extension sitting on disk unable to load. `--skip-deps` copies the file and
+touches nothing else.
 
 Or the single file, with nothing else involved:
 

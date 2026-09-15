@@ -79,7 +79,7 @@ routes handle it for you:**
 |---|---|
 | `.deb`, double-clicked or via `apt` | `Depends: python3-nautilus`, so apt installs it |
 | `.rpm`, double-clicked or via `dnf` | `Requires: nautilus-python`, so dnf installs it |
-| `./install.sh` from a clone | checks, then offers to install it for you |
+| `./install.sh` from a clone | installs it for you, or stops with an error |
 | copying `show_folder_size.py` by hand | this section is for you |
 
 Note that `sudo dpkg -i` and `rpm -i` are the exceptions. Neither resolves
@@ -139,11 +139,15 @@ cd show-folder-size-nautilus
 ./install.sh
 ```
 
-`install.sh` copies one file into `~/.local/share/nautilus-python/extensions/`.
-If `nautilus-python` is missing it shows you the exact command and asks before
-running it, so nothing reaches `sudo` without your say-so. `--yes` skips the
-question for scripted installs, `--skip-deps` leaves your package manager
-alone, and `--uninstall` removes the extension again.
+`install.sh` installs `nautilus-python` if it is missing, then copies one file
+into `~/.local/share/nautilus-python/extensions/`. It prints the command it is
+about to run and goes ahead with it, because a script that only advises you to
+install the dependency leaves the extension on disk in a state where nautilus
+ignores it and nothing says why.
+
+If the install fails, or no package manager it recognises is present, it stops
+with an error and copies nothing. `--skip-deps` copies the file and leaves the
+package manager alone; `--uninstall` removes the extension again.
 
 **Option C — system-wide, for all users:**
 

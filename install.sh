@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Install the Total Size column extension for the current user.
 #
-# Copies one file into ~/.local/share/nautilus-python/extensions/. If the
-# nautilus-python loader is missing it offers to install that first, because
-# without it nautilus never even looks at this file: there is no error, no
-# column, and nothing anywhere that says why.
+# Installs nautilus-python if it is missing, then copies one file into
+# ~/.local/share/nautilus-python/extensions/.
 #
-#   ./install.sh               ask before installing anything system-wide
-#   ./install.sh --yes         don't ask
-#   ./install.sh --skip-deps   never touch the package manager
+#   ./install.sh               install the extension, and its one dependency
+#   ./install.sh --skip-deps   copy the file only, touch nothing else
 #   ./install.sh --uninstall   remove the extension
 #
 # The .deb and .rpm need none of this. Both declare nautilus-python as a
-# dependency, so apt and dnf install it themselves; this script exists for
-# the case where someone is running from a clone and no package manager
-# knows anything about this project.
+# dependency, so apt and dnf install it themselves; this is for running from
+# a clone, where no package manager knows this project exists.
+#
+# It installs rather than advises on purpose. The previous version printed a
+# warning and copied the file anyway, which is the worst of both: the
+# extension lands on disk, nautilus silently refuses to load it because the
+# loader is missing, and the one line explaining why has already scrolled off
+# the screen. Nobody reads a warning that did not stop anything. So this
+# either finishes the job or fails loudly, and there is no third outcome.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,12 +26,25 @@ FILE="show_folder_size.py"
 SRC="${HERE}/${FILE}"
 
 ACTION=install
-ASSUME_YES=0
 SKIP_DEPS=0
 
-# The header comment above is the help text. Printing it from the file keeps
-# the two from drifting, but only if the range is found rather than counted:
-# a line number goes stale the moment anyone edits the comment.
+if [[ -t 1 ]]; then
+    BOLD=$'\033[1m'; RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; OFF=$'\033[0m'
+else
+    BOLD=""; RED=""; GREEN=""; OFF=""
+fi
+
+step() { printf '\n%s==>%s %s\n' "${BOLD}" "${OFF}" "$*"; }
+die() {
+    printf '\n%s==> FAILED:%s %s\n' "${RED}" "${OFF}" "$1" >&2
+    shift
+    for line in "$@"; do printf '    %s\n' "${line}" >&2; done
+    exit 1
+}
+
+# The header comment is the help text. Printed from the file so the two
+# cannot drift, and found rather than counted, because a hardcoded line
+# range goes stale the moment anyone edits the comment.
 usage() {
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
         "${BASH_SOURCE[0]}"
@@ -36,22 +52,23 @@ usage() {
 
 for arg in "$@"; do
     case "${arg}" in
-        --uninstall)  ACTION=uninstall ;;
-        -y|--yes)     ASSUME_YES=1 ;;
-        --skip-deps)  SKIP_DEPS=1 ;;
-        -h|--help)    usage; exit 0 ;;
-        *) echo "error: unknown option ${arg}" >&2; usage >&2; exit 2 ;;
+        --uninstall)          ACTION=uninstall ;;
+        --skip-deps)          SKIP_DEPS=1 ;;
+        -y|--yes)             ;;   # accepted and ignored: installing is now the default
+        -h|--help)            usage; exit 0 ;;
+        *) printf 'error: unknown option %s\n\n' "${arg}" >&2; usage >&2; exit 2 ;;
     esac
 done
 
 if [[ "${ACTION}" == "uninstall" ]]; then
     rm -fv "${DEST}/${FILE}"
-    echo "Removed. Run 'nautilus -q' to unload it."
-    echo "nautilus-python is left alone; remove it yourself if you want it gone."
+    printf '\n%s==> Removed.%s Run '\''nautilus -q'\'' to unload it.\n' "${GREEN}" "${OFF}"
+    echo "    nautilus-python is left installed; remove it yourself if you want it gone."
     exit 0
 fi
 
-[[ -f "${SRC}" ]] || { echo "error: ${FILE} not found next to this script" >&2; exit 1; }
+[[ -f "${SRC}" ]] || die "${FILE} not found next to this script." \
+    "Run this from a clone of the repository."
 
 # Where nautilus-python puts its loader varies twice over: the library
 # directory differs by distro (a multiarch triplet on Debian and Ubuntu,
@@ -78,90 +95,62 @@ loader_present() {
 # does not exist at all. openSUSE ships versioned packages
 # (python313-nautilus and so on) with python3-nautilus as a provides alias,
 # so the plain name still resolves.
-dep_package() {
-    if   command -v apt-get >/dev/null 2>&1; then echo "python3-nautilus"
-    elif command -v dnf     >/dev/null 2>&1; then echo "nautilus-python"
-    elif command -v zypper  >/dev/null 2>&1; then echo "python3-nautilus"
-    elif command -v pacman  >/dev/null 2>&1; then echo "nautilus-python"
-    fi
-}
-
 dep_argv() {
-    local pkg="$1"
     if   command -v apt-get >/dev/null 2>&1; then
-        printf '%s\n' apt-get install -y "${pkg}"
+        printf '%s\n' apt-get install -y python3-nautilus
     elif command -v dnf >/dev/null 2>&1; then
-        printf '%s\n' dnf install -y "${pkg}"
+        printf '%s\n' dnf install -y nautilus-python
     elif command -v zypper >/dev/null 2>&1; then
-        printf '%s\n' zypper --non-interactive install "${pkg}"
+        printf '%s\n' zypper --non-interactive install python3-nautilus
     elif command -v pacman >/dev/null 2>&1; then
-        printf '%s\n' pacman -S --needed --noconfirm "${pkg}"
+        printf '%s\n' pacman -S --needed --noconfirm nautilus-python
     fi
 }
 
 install_loader() {
-    local pkg argv=() runner=() reply
-    pkg="$(dep_package)"
-    if [[ -z "${pkg}" ]]; then
-        echo "warning: nautilus-python is missing and no package manager this" >&2
-        echo "         script knows (apt-get, dnf, zypper, pacman) was found." >&2
-        echo "         Install it yourself and re-run." >&2
-        return 1
-    fi
-    mapfile -t argv < <(dep_argv "${pkg}")
+    local argv=() runner=()
+    mapfile -t argv < <(dep_argv)
+
+    [[ ${#argv[@]} -gt 0 ]] || die \
+        "nautilus-python is missing, and no package manager I know was found." \
+        "Tried: apt-get, dnf, zypper, pacman." \
+        "Install nautilus-python yourself, then run this again." \
+        "Or use --skip-deps to copy the extension anyway."
 
     if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-        if ! command -v sudo >/dev/null 2>&1; then
-            echo "warning: ${pkg} is missing and sudo is not available." >&2
-            echo "         Run this as root:  ${argv[*]}" >&2
-            return 1
-        fi
+        command -v sudo >/dev/null 2>&1 || die \
+            "nautilus-python is missing and sudo is not available." \
+            "Run this as root: ${argv[*]}"
         runner=(sudo)
     fi
 
-    echo "nautilus-python is not installed. Without it nautilus will ignore"
-    echo "this extension entirely, with no error to tell you so."
-    echo
-    echo "  ${runner[*]:+${runner[*]} }${argv[*]}"
-    echo
-
-    # Never sudo without being told to. --yes covers scripted installs; an
-    # absent terminal means nobody is there to answer, so print the command
-    # and let them run it rather than hanging on a prompt forever.
-    if [[ "${ASSUME_YES}" -ne 1 ]]; then
-        if [[ ! -t 0 ]]; then
-            echo "warning: not running on a terminal, so not asking. Run the" >&2
-            echo "         command above, or re-run with --yes." >&2
-            return 1
-        fi
-        read -r -p "Run it now? [Y/n] " reply
-        if [[ "${reply}" =~ ^[Nn] ]]; then
-            echo "Skipped. The column will not appear until it is installed."
-            return 1
-        fi
-    fi
-
-    "${runner[@]}" "${argv[@]}"
+    step "Installing nautilus-python (${argv[*]})"
+    echo "    The extension cannot load without it. Ctrl-C now to stop."
+    "${runner[@]}" "${argv[@]}" || die \
+        "'${runner[*]:+${runner[*]} }${argv[*]}' failed." \
+        "Fix that, then run this script again." \
+        "Or use --skip-deps to copy the extension anyway."
 }
 
-if ! loader_present; then
-    if [[ "${SKIP_DEPS}" -eq 1 ]]; then
-        echo "warning: nautilus-python not found, and --skip-deps was given." >&2
-    else
-        install_loader || true
-        if ! loader_present; then
-            echo "warning: still cannot find libnautilus-python.so. Copying the" >&2
-            echo "         extension anyway; it will start working once" >&2
-            echo "         nautilus-python is installed." >&2
-        fi
-    fi
+if loader_present; then
+    step "nautilus-python is already installed"
+elif [[ "${SKIP_DEPS}" -eq 1 ]]; then
+    step "nautilus-python is missing, and --skip-deps was given"
+    echo "    The column will not appear until you install it yourself."
+else
+    install_loader
+    loader_present || die \
+        "nautilus-python installed, but its loader still is not there." \
+        "Looked for libnautilus-python.so under /usr/lib64, /usr/lib and" \
+        "the multiarch directories, in extensions-4 and extensions-3.0." \
+        "Please open an issue with your distro and 'nautilus --version'."
 fi
 
+step "Installing the extension"
 mkdir -p "${DEST}"
 cp -v "${SRC}" "${DEST}/"
 
-echo
-echo "Installed to ${DEST}/${FILE}"
-echo "Now run:  nautilus -q      (this closes open file manager windows)"
-echo "Then reopen Files and switch to List View. The Total Size column turns"
-echo "itself on the first time the extension loads."
+printf '\n%s==> Done.%s Now run:  nautilus -q\n' "${GREEN}" "${OFF}"
+echo "    That closes any open file manager windows; the next launch loads"
+echo "    the extension. Switch to List View and the Total Size column is"
+echo "    already there, enabled on first load."
