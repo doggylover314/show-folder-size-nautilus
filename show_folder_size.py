@@ -338,8 +338,9 @@ NAUTILUS_ABI = _pick_nautilus_abi()
 if NAUTILUS_ABI is None:
     raise ImportError(
         "no libnautilus-extension typelib found. Install nautilus-python: "
-        "python3-nautilus on Debian/Ubuntu, nautilus-python on Fedora and "
-        "openSUSE, python-nautilus on Arch.")
+        "python3-nautilus on Debian, Ubuntu and openSUSE, nautilus-python on "
+        "Fedora and Arch. The .deb and .rpm depend on it already, so this "
+        "only comes up when the extension was copied in by hand.")
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 

@@ -24,7 +24,7 @@ folder is being measured the column reads `Calculating...`.
 | | |
 |---|---|
 | Nautilus | 3.x – 50. The extension asks which `libnautilus-extension` ABI is installed (3.0, 4.0 or 4.1) and uses the newest, so it is not pinned to one |
-| Package | `nautilus-python` — `python3-nautilus` on Debian/Ubuntu, `nautilus-python` on Fedora, `python-nautilus` on Arch |
+| Package | `nautilus-python`, installed for you by the `.deb`, the `.rpm` and `install.sh`. By hand it is `python3-nautilus` on Debian, Ubuntu and openSUSE, `nautilus-python` on Fedora and Arch |
 | Python | 3.8+, stdlib only |
 | Dependencies | none beyond PyGObject, which nautilus-python already pulls in |
 | Packaged for | Debian/Ubuntu (`.deb`) and Fedora (`.rpm`); any other distro by copying one file |
@@ -134,7 +134,21 @@ with the reasoning next to them:
 > rather than something that updates itself. That is the one thing the
 > apt side has and this does not.
 
-Or without any package at all, on any distro:
+Or from a clone, on any distro:
+
+```bash
+git clone https://github.com/doggylover314/show-folder-size-nautilus.git
+cd show-folder-size-nautilus
+./install.sh
+nautilus -q
+```
+
+`install.sh` copies one file, and offers to install `nautilus-python` first if
+it is missing. It shows you the command and waits for an answer rather than
+reaching for `sudo` on its own; `--yes` skips the question, `--skip-deps`
+leaves the package manager alone.
+
+Or the single file, with nothing else involved:
 
 ```bash
 mkdir -p ~/.local/share/nautilus-python/extensions
@@ -142,6 +156,8 @@ curl -o ~/.local/share/nautilus-python/extensions/show_folder_size.py \
   https://raw.githubusercontent.com/doggylover314/show-folder-size-nautilus/main/show_folder_size.py
 nautilus -q
 ```
+
+That one really is just a copy, so `nautilus-python` has to be there already.
 
 Full instructions, distro package names and troubleshooting:
 **[INSTALL.md](INSTALL.md)**.

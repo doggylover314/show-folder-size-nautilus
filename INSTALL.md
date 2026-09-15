@@ -69,17 +69,37 @@ Workstation** — its contents, dependencies and paths were checked against
 Fedora's own `nautilus`, `nautilus-python`, `gtk4` and `libadwaita` spec
 files, which is not the same thing as somebody having used it.
 
-## 1. Install `nautilus-python`
+## 1. Install `nautilus-python` (usually not your job)
 
-The extension is written in Python, so Nautilus needs its Python binding. This
-is a separate package from Nautilus itself.
+The extension is written in Python, so Nautilus needs its Python binding, and
+that is a separate package from Nautilus itself. **Three of the four install
+routes handle it for you:**
+
+| Route | What happens |
+|---|---|
+| `.deb`, double-clicked or via `apt` | `Depends: python3-nautilus`, so apt installs it |
+| `.rpm`, double-clicked or via `dnf` | `Requires: nautilus-python`, so dnf installs it |
+| `./install.sh` from a clone | checks, then offers to install it for you |
+| copying `show_folder_size.py` by hand | this section is for you |
+
+Note that `sudo dpkg -i` and `rpm -i` are the exceptions. Neither resolves
+dependencies, by design. Use `apt install ./file.deb` or
+`dnf install ./file.rpm` instead and the problem disappears.
+
+Doing it yourself:
 
 | Distro | Command |
 |---|---|
 | Debian / Ubuntu / Pop!_OS / Mint | `sudo apt install python3-nautilus` |
 | Fedora | `sudo dnf install nautilus-python` |
-| Arch / Manjaro | `sudo pacman -S python-nautilus` |
+| Arch / Manjaro | `sudo pacman -S nautilus-python` |
 | openSUSE | `sudo zypper install python3-nautilus` |
+
+The name differs more than you would expect, and two of these are easy to get
+wrong: Arch renamed theirs to `nautilus-python`, so the `python-nautilus` that
+older guides recommend no longer exists, and openSUSE ships versioned packages
+(`python313-nautilus` and so on) with `python3-nautilus` as an alias that still
+resolves.
 
 Verify it's present — one of these must exist:
 
@@ -119,8 +139,11 @@ cd show-folder-size-nautilus
 ./install.sh
 ```
 
-`install.sh` just creates the directory and copies one file — read it first,
-it's a dozen lines.
+`install.sh` copies one file into `~/.local/share/nautilus-python/extensions/`.
+If `nautilus-python` is missing it shows you the exact command and asks before
+running it, so nothing reaches `sudo` without your say-so. `--yes` skips the
+question for scripted installs, `--skip-deps` leaves your package manager
+alone, and `--uninstall` removes the extension again.
 
 **Option C — system-wide, for all users:**
 

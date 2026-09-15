@@ -80,6 +80,17 @@ so Fedora Workstation installs the same way everything else on it does.
   does, and now checks two numbers rather than one: the AppStream metainfo and
   the spec's own fallback `Version`.
 
+- **`install.sh` installs `nautilus-python` for you.** It used to print a
+  warning and carry on, which left the extension sitting on disk doing
+  nothing, with no error anywhere to explain why. It now finds your package
+  manager, shows the exact command and asks before running it. `--yes` skips
+  the question, `--skip-deps` leaves the package manager alone.
+
+  The `.deb` and `.rpm` always handled this themselves (`Depends:
+  python3-nautilus` and `Requires: nautilus-python`), so `apt install ./x.deb`
+  and `dnf install ./x.rpm` were never affected. `dpkg -i` and `rpm -i` still
+  are, since neither resolves dependencies.
+
 ### Changed
 - **Packaging assets moved to `data/`.** The `.desktop` entries, the icon, the
   AppStream metainfo and the gschema override are shared by both package
@@ -94,6 +105,10 @@ so Fedora Workstation installs the same way everything else on it does.
 - Messages that named a missing package now name it per distro rather than
   assuming Debian: `python3-nautilus` / `nautilus-python` / `python-nautilus`,
   and `gir1.2-gtk-4.0` / `gtk4`.
+- The Arch package name was wrong everywhere it appeared. It is
+  `nautilus-python`; `python-nautilus`, which the README and install guide
+  both recommended, does not exist in the Arch repositories at all. The
+  openSUSE name was wrong in one place too.
 - `INSTALL.md`'s version-compatibility section said the extension targets
   libnautilus-extension 4.0 and pins it with `gi.require_version`, and that
   Nautilus 42 was unsupported. None of that has been true since 1.0.0, which
