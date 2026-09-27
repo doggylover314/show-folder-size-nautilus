@@ -16,7 +16,7 @@ the defaults gave you.
 **Debian, Ubuntu, Mint, Pop!\_OS:**
 
 ```bash
-sudo apt install ./show-folder-size-nautilus_1.1.1_all.deb
+sudo apt install ./show-folder-size-nautilus_1.1.2_all.deb
 nautilus -q
 ```
 
@@ -43,7 +43,7 @@ the command line.
 **Fedora Workstation:**
 
 ```bash
-sudo dnf install ./show-folder-size-nautilus-1.1.1-1.fc42.noarch.rpm
+sudo dnf install ./show-folder-size-nautilus-1.1.2-1.fc42.noarch.rpm
 nautilus -q
 ```
 
@@ -297,23 +297,22 @@ journalctl --user -b | grep show-folder-size-index
 
 ## 7b. Keeping it updated
 
-A package you downloaded and installed is a one-off. Nothing goes looking for
-a newer one, so it stays at whatever version you installed until you install
-another by hand. That applies to both the `.deb` and the `.rpm`.
-
-Adding a repository is what changes that. Then the machine's own update
-process handles it, like every other package:
+Since 1.1.2, nothing to do. Installing the downloaded `.rpm` or `.deb` also
+installs its repository definition and signing key, so newer versions arrive
+with your normal updates:
 
 ```bash
-# Debian / Ubuntu
-sudo apt update && sudo apt upgrade
-
-# Fedora
-sudo dnf upgrade
+sudo dnf upgrade                          # Fedora
+sudo apt update && sudo apt upgrade       # Debian / Ubuntu
 ```
 
-See the README for the lines that add each repository. Neither is published
-yet; `./build-apt-repo.sh` and `./build-dnf-repo.sh` build them from a clone.
+GNOME Software picks them up too. The first time, the package manager shows
+the key's fingerprint and asks you to trust it. The README's
+[Updates are automatic](README.md#updates-are-automatic) lists the files
+involved and how to switch it off.
+
+A package from before 1.1.2 has none of this and stays at its version until
+you install 1.1.2 or later once by hand.
 
 Installing from a clone with `./install.sh` is its own thing again: that is a
 copy, so `git pull && ./install.sh` is the upgrade.

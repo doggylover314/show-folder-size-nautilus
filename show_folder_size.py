@@ -357,7 +357,7 @@ if NAUTILUS_ABI is None:
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # --- tunables ---------------------------------------------------------------
 

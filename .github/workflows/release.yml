@@ -1,21 +1,21 @@
 # Release: runs when show_folder_size.py (where __version__ lives) changes on
 # main, or by hand from the Actions tab.
 #
-# For a version with no release yet, it builds the .deb and .rpm, tags the
-# commit and creates the GitHub release. Then, if the SIGNING_KEY secret is
-# set, it builds the signed apt and dnf repositories and publishes them to
-# GitHub Pages. That last part is what lets `dnf upgrade` and `apt upgrade`
-# pick up a new version by themselves.
+# For a version with no release yet, it builds the .deb and .rpm, signs the
+# .rpm, tags the commit and creates the GitHub release. Both packages carry
+# the repository definition and public key, so anyone who installs the
+# downloaded file once gets later versions from `dnf upgrade`, `apt upgrade`
+# and GNOME Software. It then publishes those signed repositories by pushing
+# them to the gh-pages branch, which GitHub Pages serves.
 #
-# So releasing is: bump __version__ (build-deb.sh and build-rpm.sh refuse to
-# build until the metainfo and spec agree with it), push to main. That's all.
+# Releasing is therefore: bump __version__ (build-deb.sh and build-rpm.sh
+# refuse to build until the metainfo and spec agree with it), push to main.
 #
-# One-time setup by the repository owner, see "Publishing" in the README:
-#   * a SIGNING_KEY secret: an ASCII-armoured GPG private key, no passphrase.
-#     It has to be the SAME key for every release, because users' dnf and apt
-#     trust the key they imported the first time. That is why it lives in the
-#     repository's secrets and is not generated here.
-#   * Settings > Pages > Source: GitHub Actions.
+# The one requirement is a SIGNING_KEY secret, set once by the repository
+# owner: an ASCII-armoured GPG private key with no passphrase. It has to stay
+# the same key forever, because installed copies trust the key they shipped
+# with. That is why it is a secret and never generated here. See "Publishing
+# a release" in the README.
 
 name: Release
 
@@ -28,9 +28,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write     # tag and release
-  pages: write        # publish the repositories
-  id-token: write     # required by deploy-pages
+  contents: write     # tag, release, and the gh-pages branch
+  pages: write        # ask Pages to rebuild after the push
 
 # Two pushes in quick succession must not race to create the same release.
 concurrency:
@@ -40,8 +39,6 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
-    outputs:
-      publish: ${{ steps.key.outputs.present }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +49,23 @@ jobs:
           [ -n "$version" ] || { echo "::error::no __version__ in show_folder_size.py"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # First, because the packages are built with the public half inside
+      # them. Without it a release would ship packages that cannot update
+      # themselves, so it stops here instead.
+      - name: Import the signing key
+        id: key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::No SIGNING_KEY secret. Packages carry the public key so they can update themselves, so nothing is released without it. See 'Publishing a release' in the README."
+            exit 1
+          fi
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          fpr="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
+          gpg --armor --export "$fpr" > "$RUNNER_TEMP/repo-key.asc"
+          echo "fpr=$fpr" >> "$GITHUB_OUTPUT"
 
       - name: Install build tools
         run: |
@@ -74,6 +88,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
+          FPR: ${{ steps.key.outputs.fpr }}
+          REPO_KEY: ${{ runner.temp }}/repo-key.asc
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             # Already released. Publish exactly those files rather than a
@@ -86,51 +102,41 @@ jobs:
           else
             ./build-deb.sh
             ./build-rpm.sh
+            # Signed here, before it is attached, so the download and the
+            # copy in the dnf repository are one and the same file.
+            rpmsign --define "_gpg_name $FPR" --addsign dist/*.rpm
             {
               awk -v v="$VERSION" '
                 index($0, "## [" v "]") == 1 { on = 1; next }
                 on && /^## \[/ { exit }
                 on { print }' CHANGELOG.md
-              echo "### Install or upgrade"
-              echo "- Fedora: \`sudo dnf upgrade show-folder-size-nautilus\`, once the repository is added (see the README), or \`sudo dnf install ./\` the \`.rpm\` below."
-              echo "- Debian/Ubuntu: \`sudo apt install ./\` the \`.deb\` below."
+              echo "### Install"
+              echo "- Fedora: download the \`.rpm\` below and open it, or \`sudo dnf install ./\` it."
+              echo "- Debian/Ubuntu: download the \`.deb\` below and open it, or \`sudo apt install ./\` it."
+              echo ""
+              echo "Either way, later versions then arrive with your normal system updates."
             } > notes.md
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
               --notes-file notes.md dist/*.deb dist/*.rpm
           fi
           ls -l dist
 
-      - name: Import the signing key
-        id: key
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        run: |
-          if [ -z "$SIGNING_KEY" ]; then
-            echo "::warning::No SIGNING_KEY secret, so the apt and dnf repositories were not published. The GitHub release was. See Publishing in the README."
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
-          fpr="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
-          echo "fpr=$fpr" >> "$GITHUB_OUTPUT"
-          echo "present=true" >> "$GITHUB_OUTPUT"
-
       - name: Build the repositories
-        if: steps.key.outputs.present == 'true'
         run: ./build-site.sh --key "${{ steps.key.outputs.fpr }}" --out site
 
-      - uses: actions/upload-pages-artifact@v3
-        if: steps.key.outputs.present == 'true'
-        with:
-          path: site
-
-  pages:
-    needs: release
-    if: needs.release.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      # Force-pushed as one fresh commit each time, so gh-pages never
+      # accumulates a history of every package ever built.
+      - name: Publish to GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Package repositories for $TAG"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:gh-pages
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" >/dev/null ||
+            echo "::warning::Could not request a Pages build; the push normally starts one."

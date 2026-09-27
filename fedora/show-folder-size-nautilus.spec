@@ -46,7 +46,7 @@
 # build-rpm.sh REFUSES TO BUILD if the two disagree, the same way it refuses
 # on a stale version in the AppStream metainfo.  A version that is only
 # checked when somebody looks at it is a version that will be wrong.
-%global upstream_version 1.1.1
+%global upstream_version 1.1.2
 
 Name:           show-folder-size-nautilus
 Version:        %{?_version}%{!?_version:%{upstream_version}}
@@ -157,6 +157,33 @@ cache_dir=~/.cache/show-folder-size-nautilus
 EOF
 chmod 0644 %{buildroot}%{_sysconfdir}/%{name}.conf
 
+# The repository this package updates itself from, and the key that signs it.
+# Present only when the build is handed a public key (REPO_KEY, see
+# build-rpm.sh), which the release workflow always does. That is what lets
+# someone download the .rpm once, install it, and from then on get updates
+# from `dnf upgrade` and GNOME Software with nothing added by hand -- the
+# same arrangement Google Chrome and VS Code ship.
+#
+# The key is installed as a file and named in gpgkey=file://, so dnf asks the
+# user to trust it, with its fingerprint, the first time it is used. It is
+# deliberately not imported from %post: running rpm inside an rpm transaction
+# fights over the database lock, and trust is the user's call to make anyway.
+%if 0%{?_repo_url:1}
+install -Dpm 0644 repo-key.asc \
+    %{buildroot}%{_sysconfdir}/pki/rpm-gpg/RPM-GPG-KEY-%{name}
+install -d %{buildroot}%{_sysconfdir}/yum.repos.d
+cat > %{buildroot}%{_sysconfdir}/yum.repos.d/%{name}.repo <<EOF
+[%{name}]
+name=Total Size column for GNOME Files
+baseurl=%{_repo_url}/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file://%{_sysconfdir}/pki/rpm-gpg/RPM-GPG-KEY-%{name}
+metadata_expire=6h
+EOF
+%endif
+
 %check
 # Both validators are BuildRequires, so on Fedora these always run.  The
 # guards are for building this spec on a machine that is not Fedora, where
@@ -202,8 +229,16 @@ fi
 %{_datadir}/metainfo/%{appid}.metainfo.xml
 %{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
 %{_datadir}/glib-2.0/schemas/90_%{name}.gschema.override
+%if 0%{?_repo_url:1}
+# noreplace: switching the repository off (enabled=0) survives an upgrade.
+%config(noreplace) %{_sysconfdir}/yum.repos.d/%{name}.repo
+%{_sysconfdir}/pki/rpm-gpg/RPM-GPG-KEY-%{name}
+%endif
 
 %changelog
+* Sun Sep 27 2026 doggylover314 <doggylover314@users.noreply.github.com> - 1.1.2-1
+- The package installs its own repository, so it updates with the system.
+
 * Sun Sep 27 2026 doggylover314 <doggylover314@users.noreply.github.com> - 1.1.1-1
 - Sizes update on screen when files change, including inside subfolders.
 - Measuring no longer stalls while Nautilus is idle.

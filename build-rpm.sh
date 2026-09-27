@@ -81,8 +81,25 @@ for item in show_folder_size.py show-folder-size-index show-folder-size-setup \
             README.md INSTALL.md CHANGELOG.md LICENSE data; do
     cp -r "${HERE}/${item}" "${TOP}/${DIR}/"
 done
+
+# REPO_KEY: an ASCII-armoured public key. Given one, the package installs a
+# repository definition and that key, so it keeps itself updated after being
+# installed once from a download. The release workflow always sets it; a
+# local build without it makes a package that simply does not self-update.
+# REPO_URL overrides where that repository lives, which is how the tests
+# point it at a local server.
+REPO_URL="${REPO_URL:-https://doggylover314.github.io/show-folder-size-nautilus}"
+REPO_DEFINES=()
+if [[ -n "${REPO_KEY:-}" ]]; then
+    [[ -s "${REPO_KEY}" ]] || { echo "error: REPO_KEY=${REPO_KEY} is empty or missing" >&2; exit 1; }
+    cp "${REPO_KEY}" "${TOP}/${DIR}/repo-key.asc"
+    REPO_DEFINES=(--define "_repo_url ${REPO_URL}")
+    echo "including the self-update repository: ${REPO_URL}/rpm"
+else
+    echo "note: REPO_KEY not set, so this package will not update itself"
+fi
 tar -czf "${TOP}/SOURCES/${DIR}.tar.gz" -C "${TOP}" "${DIR}"
-rm -rf "${TOP}/${DIR}"
+rm -rf "${TOP:?}/${DIR:?}"
 
 # On an RPM-managed system rpmbuild checks BuildRequires against the package
 # database, which is right and should stay on. On Debian or Ubuntu that
@@ -102,6 +119,7 @@ rpmbuild -bb "${SPEC}" \
     --define "_topdir ${TOP}" \
     --define "_version ${VERSION}" \
     --define "_build_id_links none" \
+    "${REPO_DEFINES[@]}" \
     "${RPMBUILD_ARGS[@]}"
 
 mkdir -p "${OUT}"

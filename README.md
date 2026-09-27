@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached on disk, so browsing never
 blocks and a folder measured once stays instant across restarts. While a
 folder is being measured the column reads `Calculating...`.
 
-> **Status: v1.1.1.** Install the `.deb` or the `.rpm` by double-clicking it,
+> **Status: v1.1.2.** Install the `.deb` or the `.rpm` by double-clicking it,
 > run `nautilus -q`, and the column is there — it enables itself on first
 > load. Measurement uses the same GIO call as Nautilus' Properties window, and
 > sizes are formatted exactly like the built-in Size column. **Clicking the
@@ -36,81 +36,49 @@ exactly what that covers.
 
 ## Install
 
-**Double-click the `.deb`** (Debian, Ubuntu, Mint, Pop!\_OS) **or the
-`.rpm`** (Fedora Workstation). GNOME Software opens, you press Install, then:
+Download the package for your system from the
+[latest release](https://github.com/doggylover314/show-folder-size-nautilus/releases/latest)
+and open it: the `.rpm` on Fedora, the `.deb` on Debian, Ubuntu, Mint and
+Pop!\_OS. GNOME Software opens, you press Install, then:
 
 ```bash
 nautilus -q   # closes open windows; next launch loads the extension
 ```
 
-On Fedora the terminal equivalent is:
-
-```bash
-sudo dnf install ./show-folder-size-nautilus-1.1.1-1.fc42.noarch.rpm
-nautilus -q
-```
+Or in a terminal, `sudo dnf install ./show-folder-size-nautilus-*.rpm` or
+`sudo apt install ./show-folder-size-nautilus_*.deb`.
 
 Switch to **List View** and the column is already there. It enables itself the
 first time the extension loads, once — untick it in **Visible Columns** and it
 stays unticked.
 
-### Or from the apt repository (recommended, and it keeps itself updated)
+### Updates are automatic
 
-> Published by the release workflow once the one-time setup in
-> [Publishing a release](#publishing-a-release) is done. Until then these
-> commands fail on the signing key, and the
-> [releases page](https://github.com/doggylover314/show-folder-size-nautilus/releases)
-> is the way in.
+That download is the only one you make. The package also installs where its
+updates come from, a repository definition and the key that signs it, so
+later versions arrive with the rest of your system updates: `sudo dnf
+upgrade`, `sudo apt upgrade`, or GNOME Software's update notifications. The
+first time, your package manager shows the key's fingerprint and asks you to
+trust it. Chrome and VS Code ship the same arrangement.
 
-Add it once and this upgrades with the rest of your system:
+There is deliberately no updater inside this project. Nothing here checks the
+network, and something that did would cost the "no network access" property
+the audit notes are built around, plus a privileged helper to do the
+installing. Your system already has a signed, unattended-capable update
+mechanism, so this uses it.
 
-```bash
-sudo install -d -m 0755 /etc/apt/keyrings
-```
+| | Repository definition | Key |
+|---|---|---|
+| `.rpm` | `/etc/yum.repos.d/show-folder-size-nautilus.repo` | `/etc/pki/rpm-gpg/RPM-GPG-KEY-show-folder-size-nautilus` |
+| `.deb` | `/etc/apt/sources.list.d/show-folder-size-nautilus.sources` | `/usr/share/keyrings/show-folder-size-nautilus.gpg` |
 
-```bash
-sudo curl -fsSL -o /etc/apt/keyrings/show-folder-size-nautilus.gpg https://doggylover314.github.io/show-folder-size-nautilus/show-folder-size-nautilus.gpg
-```
+To stop updates coming from it, set `enabled=0` in the `.repo` file or
+`Enabled: no` in the `.sources` file; both are config files, so the change
+survives upgrades. The apt key is scoped to this repository alone with
+`Signed-By`, so it is not trusted for anything else apt installs.
 
-```bash
-echo "deb [signed-by=/etc/apt/keyrings/show-folder-size-nautilus.gpg] https://doggylover314.github.io/show-folder-size-nautilus stable main" | sudo tee /etc/apt/sources.list.d/show-folder-size-nautilus.list
-```
-
-```bash
-sudo apt update && sudo apt install show-folder-size-nautilus
-```
-
-**This is the update mechanism.** There is deliberately no updater inside this
-project: nothing here checks the network, and adding something that did would
-have cost the "no network access" property that the audit notes are built
-around, plus a privileged helper to do the installing. Your machine already
-has a well-tested, signed, unattended-capable update system, so this uses it.
-`unattended-upgrades` and GNOME Software pick it up with no further setup.
-
-### Or from the dnf repository (recommended on Fedora, same reason)
-
-> Published by the release workflow, like the apt one, once the setup in
-> [Publishing a release](#publishing-a-release) is done.
-
-```bash
-sudo curl -fsSL -o /etc/yum.repos.d/show-folder-size-nautilus.repo \
-  https://doggylover314.github.io/show-folder-size-nautilus/rpm/show-folder-size-nautilus.repo
-```
-
-```bash
-sudo dnf install show-folder-size-nautilus
-```
-
-dnf shows the signing key's fingerprint and asks before importing it the first
-time. After that it upgrades with everything else, and `dnf-automatic` picks it
-up with no further setup.
-
-Both repositories can live on one Pages site: apt owns `dists/` and `pool/` at
-the root, dnf owns everything under `rpm/`. Two signatures are needed on the
-dnf side, and skipping either is a silent half-measure — `repomd.xml.asc` is
-what `repo_gpgcheck=1` verifies, and the signature inside each `.rpm` is what
-`gpgcheck=1` verifies. `build-dnf-repo.sh` does both and refuses to finish if
-either is missing.
+Packages from before 1.1.2 don't include any of this. Install 1.1.2 or later
+once by hand and it takes over from there.
 
 ### Fedora Workstation
 
@@ -150,13 +118,12 @@ with the reasoning next to them:
 > passes both `.desktop` files and `appstreamcli validate` passes the
 > metainfo. Fedora's own package names, paths and library directory were
 > checked against the current `nautilus`, `nautilus-python`, `gtk4` and
-> `libadwaita` spec files rather than guessed at. **Nobody has yet installed
-> this on a running Fedora Workstation** — the same distinction the
-> [GNOME version support](#gnome-version-support) table makes. If you do, a
-> report either way is genuinely useful.
+> `libadwaita` spec files rather than guessed at. It has since been installed
+> and used on a real Fedora Workstation, which is where the sorting and
+> live-update bugs fixed in 1.1.1 were first noticed.
 >
-> A one-off `.rpm` download never updates itself. Use the dnf repository
-> above if you want it upgrading with the rest of the system.
+> Since 1.1.2 the `.rpm` keeps itself updated; see
+> [Updates are automatic](#updates-are-automatic).
 
 Or from a clone, on any distro:
 
@@ -188,45 +155,36 @@ Full instructions, distro package names and troubleshooting:
 
 ## Publishing a release
 
+For maintainers; users never see any of this.
+
 Bump `__version__`, push to `main`. The
-[release workflow](.github/workflows/release.yml) does the rest: tests, both
-packages, the tag, the GitHub release, and the signed apt and dnf
-repositories on GitHub Pages. That last step is what lets `dnf upgrade` and
-`apt upgrade` find the new version on their own.
+[release workflow](.github/workflows/release.yml) runs the tests, builds both
+packages with the repository and public key inside them, signs the `.rpm`,
+tags, creates the GitHub release, and publishes the signed apt and dnf
+repositories to the `gh-pages` branch that GitHub Pages serves. The build
+scripts refuse to run if the metainfo or the RPM spec disagrees with
+`__version__`.
 
-The build scripts refuse to run if the version in the AppStream metainfo or
-the RPM spec disagrees with `__version__`, so a release can't ship with a
-stale version in either.
-
-**One-time setup**, from any machine with `gpg` and `gh` logged in:
+**Once, ever:** give the workflow a signing key.
 
 ```bash
-# 1. The signing key. No passphrase, because CI signs unattended. Skipped if
-#    it already exists, so running this twice can't make a second key.
 gpg --list-secret-keys "show-folder-size-nautilus packages" >/dev/null 2>&1 ||
   gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
     "show-folder-size-nautilus packages <doggylover314@users.noreply.github.com>" \
     default default never
-
-# 2. Give it to the workflow.
 gpg --armor --export-secret-keys "show-folder-size-nautilus packages" \
   | gh secret set SIGNING_KEY --repo doggylover314/show-folder-size-nautilus
-
-# 3. Publish GitHub Pages from Actions. POST creates Pages; if it already
-#    exists (deploying from a branch), PUT switches it over.
-gh api -X POST repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow 2>/dev/null \
-  || gh api -X PUT repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow
-
-# 4. Publish the current version.
 gh workflow run release.yml --repo doggylover314/show-folder-size-nautilus
 ```
 
-**Keep a copy of that key.** Every user's dnf and apt trust the key they
-imported the first time. Lose it and the next release fails their signature
-check until each of them imports a new one.
+No passphrase, because CI signs unattended. The first command skips itself if
+the key already exists, so running this twice can't make a second one.
 
-Without the secret, the workflow still creates the GitHub release and
-warns that it skipped the repositories. Add the secret and re-run it.
+Until the secret exists, a release run stops with an error rather than
+shipping packages that can't update themselves.
+
+**Keep a copy of that key.** Every installed copy trusts the key it shipped
+with. Lose it and the next release fails every user's signature check.
 
 ## Folder Size Setup
 
@@ -369,6 +327,11 @@ all of it safe to delete:
 | `~/.config/show-folder-size-nautilus.conf` | when you press Save in the setup window, or flip its sorting switch | not doing either |
 | `~/.config/autostart/…ShowFolderSizeIndex.desktop` | only when you change the login setting | not changing it |
 | `~/.config/environment.d/60-show-folder-size-nautilus.conf` | only if you switch on the session-environment option | leaving it off, which is the default |
+
+The package itself also installs its update source when you install it: a
+repository definition and signing key under `/etc`, listed in
+[Updates are automatic](#updates-are-automatic). Those come from the package
+manager at install time; the extension never writes them.
 
 The cache is split across up to 100 shard files, each written atomically (temp
 file + `os.replace`) so a crash cannot corrupt one, and each holding directory
@@ -514,9 +477,8 @@ by default.
 
 ## Telling other people about it
 
-- **Point them at the repository lines above**, apt or dnf, not at a `.deb`
-  or `.rpm` download. A downloaded package is a one-off that never updates;
-  a repository means they get fixes without doing anything.
+- **Point them at the latest release.** Since 1.1.2 the downloaded `.rpm` or
+  `.deb` keeps itself updated, so there is nothing else to explain.
 - The `.deb` renders properly in GNOME Software (icon, description, screenshot
   metadata), so "download it and double-click" works for people who would
   rather not touch a terminal.

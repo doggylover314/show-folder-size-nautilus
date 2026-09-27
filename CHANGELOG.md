@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-09-27
+
+### Added
+- **Download once, updated forever.** The `.rpm` and `.deb` install their own
+  repository definition and signing key, so after installing the downloaded
+  file once, `dnf upgrade`, `apt upgrade` and GNOME Software keep it current.
+  Nothing to add by hand. Same arrangement as Chrome and VS Code.
+- The release `.rpm` is signed.
+
+### Changed
+- Repositories are published by pushing to the `gh-pages` branch that GitHub
+  Pages already serves, so publishing needs no Pages settings change.
+- A release now requires the signing key: a package without it could not
+  update itself, so the workflow stops instead of shipping one.
+
 ## [1.1.1] - 2026-09-27
 
 Found by running the extension inside a real Nautilus for the first time.
@@ -700,7 +715,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.2
 [1.1.1]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.1
 [1.1.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.0
 [1.0.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.0.0

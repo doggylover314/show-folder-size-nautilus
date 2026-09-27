@@ -107,6 +107,37 @@ install -m 0644 "${HERE}/data/90_${PKG}.gschema.override" \
 install -m 0644 "${HERE}/data/${AUTOSTART_ID}.desktop" \
         "${BUILD}/etc/xdg/autostart/"
 
+# The repository this package updates itself from, and its signing key, when
+# the build is handed a public key (REPO_KEY). Same reason as the .rpm: install
+# the downloaded .deb once and `apt upgrade` keeps it current afterwards, with
+# nothing added by hand. deb822 .sources rather than a one-line .list, because
+# Signed-By scopes the key to this repository alone instead of trusting it
+# for everything apt installs.
+REPO_URL="${REPO_URL:-https://doggylover314.github.io/show-folder-size-nautilus}"
+SOURCES="/etc/apt/sources.list.d/${PKG}.sources"
+KEYRING="/usr/share/keyrings/${PKG}.gpg"
+if [[ -n "${REPO_KEY:-}" ]]; then
+    [[ -s "${REPO_KEY}" ]] || { echo "error: REPO_KEY=${REPO_KEY} is empty or missing" >&2; exit 1; }
+    command -v gpg >/dev/null 2>&1 || { echo "error: REPO_KEY needs gpg to dearmour it" >&2; exit 1; }
+    install -d "${BUILD}/usr/share/keyrings" "${BUILD}/etc/apt/sources.list.d"
+    # Binary, not armoured: every apt that understands Signed-By reads this.
+    gpg --dearmor < "${REPO_KEY}" > "${BUILD}${KEYRING}"
+    chmod 0644 "${BUILD}${KEYRING}"
+    cat > "${BUILD}${SOURCES}" <<EOF
+Types: deb
+URIs: ${REPO_URL}
+Suites: stable
+Components: main
+Signed-By: ${KEYRING}
+EOF
+    chmod 0644 "${BUILD}${SOURCES}"
+    # A conffile, so someone who sets "Enabled: no" keeps that across upgrades.
+    echo "${SOURCES}" > "${BUILD}/DEBIAN/conffiles"
+    echo "including the self-update repository: ${REPO_URL}"
+else
+    echo "note: REPO_KEY not set, so this package will not update itself"
+fi
+
 # Debian wants the licence as `copyright`.
 install -m 0644 "${HERE}/LICENSE" "${BUILD}/usr/share/doc/${PKG}/copyright"
 
