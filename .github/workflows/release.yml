@@ -1,0 +1,130 @@
+# Release: runs when show_folder_size.py (where __version__ lives) changes on
+# main, or by hand from the Actions tab.
+#
+# For a version with no release yet, it builds the .deb and .rpm, tags the
+# commit and creates the GitHub release. Then, if the SIGNING_KEY secret is
+# set, it builds the signed apt and dnf repositories and publishes them to
+# GitHub Pages. That last part is what lets `dnf upgrade` and `apt upgrade`
+# pick up a new version by themselves.
+#
+# So releasing is: bump __version__ (build-deb.sh and build-rpm.sh refuse to
+# build until the metainfo and spec agree with it), push to main. That's all.
+#
+# One-time setup by the repository owner, see "Publishing" in the README:
+#   * a SIGNING_KEY secret: an ASCII-armoured GPG private key, no passphrase.
+#     It has to be the SAME key for every release, because users' dnf and apt
+#     trust the key they imported the first time. That is why it lives in the
+#     repository's secrets and is not generated here.
+#   * Settings > Pages > Source: GitHub Actions.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - show_folder_size.py
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write     # tag and release
+  pages: write        # publish the repositories
+  id-token: write     # required by deploy-pages
+
+# Two pushes in quick succession must not race to create the same release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.key.outputs.present }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' show_folder_size.py)"
+          [ -n "$version" ] || { echo "::error::no __version__ in show_folder_size.py"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm createrepo-c apt-utils dpkg-dev gnupg \
+            desktop-file-utils python3-gi gir1.2-pango-1.0 python3-gi-cairo \
+            fonts-dejavu-core
+
+      - name: Tests
+        run: tests/run-tests.sh
+
+      - name: Create the release, or fetch the one that exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Already released. Publish exactly those files rather than a
+            # rebuild that merely shares the version number: someone who
+            # downloaded the .rpm and someone who got it from dnf should have
+            # the same bytes.
+            echo "$TAG already exists; publishing its files"
+            mkdir -p dist
+            gh release download "$TAG" --dir dist --pattern '*.rpm' --pattern '*.deb'
+          else
+            ./build-deb.sh
+            ./build-rpm.sh
+            {
+              awk -v v="$VERSION" '
+                index($0, "## [" v "]") == 1 { on = 1; next }
+                on && /^## \[/ { exit }
+                on { print }' CHANGELOG.md
+              echo "### Install or upgrade"
+              echo "- Fedora: \`sudo dnf upgrade show-folder-size-nautilus\`, once the repository is added (see the README), or \`sudo dnf install ./\` the \`.rpm\` below."
+              echo "- Debian/Ubuntu: \`sudo apt install ./\` the \`.deb\` below."
+            } > notes.md
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
+              --notes-file notes.md dist/*.deb dist/*.rpm
+          fi
+          ls -l dist
+
+      - name: Import the signing key
+        id: key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::No SIGNING_KEY secret, so the apt and dnf repositories were not published. The GitHub release was. See Publishing in the README."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          fpr="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
+          echo "fpr=$fpr" >> "$GITHUB_OUTPUT"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the repositories
+        if: steps.key.outputs.present == 'true'
+        run: ./build-site.sh --key "${{ steps.key.outputs.fpr }}" --out site
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.key.outputs.present == 'true'
+        with:
+          path: site
+
+  pages:
+    needs: release
+    if: needs.release.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

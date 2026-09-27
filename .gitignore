@@ -11,4 +11,5 @@ dist/
 build/
 apt/
 dnf/
+site/
 tests/fixtures/

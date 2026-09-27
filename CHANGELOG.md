@@ -8,6 +8,16 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Found by running the extension inside a real Nautilus for the first time.
 
+### Added
+- **Releases are automatic.** Bump `__version__` and push to `main`: a GitHub
+  Actions workflow tags it, builds both packages, creates the release and
+  publishes signed apt and dnf repositories to GitHub Pages. With the
+  repository added, `sudo dnf upgrade show-folder-size-nautilus` picks up
+  new versions.
+- `build-site.sh` assembles that Pages site, so what CI publishes can be built
+  and tested locally first. Tested with a real `dnf upgrade` from 1.1.0 to
+  1.1.1, and dnf refused both an unsigned package and altered metadata.
+
 ### Fixed
 - **Sizes didn't update on screen.** A change was detected and the old total
   thrown away, but nothing told Nautilus, so the cell kept the stale number

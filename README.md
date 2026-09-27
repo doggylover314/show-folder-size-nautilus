@@ -56,11 +56,11 @@ stays unticked.
 
 ### Or from the apt repository (recommended, and it keeps itself updated)
 
-> **Not published yet.** The repository goes live with the first published
-> release; until then these commands will fail on the signing key, and the
+> Published by the release workflow once the one-time setup in
+> [Publishing a release](#publishing-a-release) is done. Until then these
+> commands fail on the signing key, and the
 > [releases page](https://github.com/doggylover314/show-folder-size-nautilus/releases)
-> is the way in. Building it yourself from a clone works today:
-> `./build-apt-repo.sh --key <YOURKEY>`.
+> is the way in.
 
 Add it once and this upgrades with the rest of your system:
 
@@ -89,8 +89,8 @@ has a well-tested, signed, unattended-capable update system, so this uses it.
 
 ### Or from the dnf repository (recommended on Fedora, same reason)
 
-> **Not published yet**, exactly like the apt one. `./build-dnf-repo.sh --key
-> <YOURKEY>` builds it from a clone today.
+> Published by the release workflow, like the apt one, once the setup in
+> [Publishing a release](#publishing-a-release) is done.
 
 ```bash
 sudo curl -fsSL -o /etc/yum.repos.d/show-folder-size-nautilus.repo \
@@ -185,6 +185,47 @@ That one really is just a copy, so `nautilus-python` has to be there already.
 
 Full instructions, distro package names and troubleshooting:
 **[INSTALL.md](INSTALL.md)**.
+
+## Publishing a release
+
+Bump `__version__`, push to `main`. The
+[release workflow](.github/workflows/release.yml) does the rest: tests, both
+packages, the tag, the GitHub release, and the signed apt and dnf
+repositories on GitHub Pages. That last step is what lets `dnf upgrade` and
+`apt upgrade` find the new version on their own.
+
+The build scripts refuse to run if the version in the AppStream metainfo or
+the RPM spec disagrees with `__version__`, so a release can't ship with a
+stale version in either.
+
+**One-time setup**, from any machine with `gpg` and `gh` logged in:
+
+```bash
+# 1. The signing key. No passphrase, because CI signs unattended.
+gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
+  "show-folder-size-nautilus packages <doggylover314@users.noreply.github.com>" \
+  default default never
+
+# 2. Give it to the workflow.
+gpg --armor --export-secret-keys "show-folder-size-nautilus packages" \
+  | gh secret set SIGNING_KEY --repo doggylover314/show-folder-size-nautilus
+
+# 3. Turn on GitHub Pages, published by Actions.
+gh api -X POST repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow
+
+# 4. Publish the current version.
+gh workflow run release.yml --repo doggylover314/show-folder-size-nautilus
+```
+
+If step 3 says Pages already exists, set **Settings → Pages → Source** to
+*GitHub Actions* instead.
+
+**Keep a copy of that key.** Every user's dnf and apt trust the key they
+imported the first time. Lose it and the next release fails their signature
+check until each of them imports a new one.
+
+Without the secret, the workflow still creates the GitHub release and
+warns that it skipped the repositories. Add the secret and re-run it.
 
 ## Folder Size Setup
 
