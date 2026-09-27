@@ -30,8 +30,8 @@ command -v dpkg-deb >/dev/null 2>&1 || {
 FETCH=(
     "lib-3.0:libnautilus-extension1a_42.6-0ubuntu2_amd64.deb"
     "typelib-3.0:gir1.2-nautilus-3.0_42.6-0ubuntu2_amd64.deb"
-    "lib-4.1:libnautilus-extension4_50.2.2-0ubuntu0.1_amd64.deb"
-    "typelib-4.1:gir1.2-nautilus-4.1_50.2.2-0ubuntu0.1_amd64.deb"
+    "lib-4.1:libnautilus-extension4_50.2.2-0ubuntu0.2_amd64.deb"
+    "typelib-4.1:gir1.2-nautilus-4.1_50.2.2-0ubuntu0.2_amd64.deb"
 )
 
 mkdir -p "${FIX}"
