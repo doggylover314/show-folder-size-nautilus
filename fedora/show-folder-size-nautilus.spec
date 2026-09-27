@@ -46,7 +46,7 @@
 # build-rpm.sh REFUSES TO BUILD if the two disagree, the same way it refuses
 # on a stale version in the AppStream metainfo.  A version that is only
 # checked when somebody looks at it is a version that will be wrong.
-%global upstream_version 1.1.0
+%global upstream_version 1.1.1
 
 Name:           show-folder-size-nautilus
 Version:        %{?_version}%{!?_version:%{upstream_version}}
@@ -204,6 +204,10 @@ fi
 %{_datadir}/glib-2.0/schemas/90_%{name}.gschema.override
 
 %changelog
+* Sun Sep 27 2026 doggylover314 <doggylover314@users.noreply.github.com> - 1.1.1-1
+- Sizes update on screen when files change, including inside subfolders.
+- Measuring no longer stalls while Nautilus is idle.
+
 * Thu Sep 10 2026 doggylover314 <doggylover314@users.noreply.github.com> - 1.1.0-1
 - Clicking the Total Size header sorts by size instead of by text.
 - First RPM build; Fedora Workstation installs the same payload as the .deb.

@@ -74,7 +74,9 @@ cache.  v0.6.0 adds two more writes, both one-off, listed below.
 
 The only side effects are: CPU/IO from directory traversal, memory for the
 result cache (bounded, see CACHE_LIMIT), inotify watches (bounded, see
-MONITOR_LIMIT), the one cache file above, and the text drawn in the column.
+MONITOR_LIMIT and DEEP_WATCH_LIMIT), a 20ms timer that runs only while a
+measurement is outstanding (see _pump), the one cache file above, and the
+text drawn in the column.
 
 CONFIGURATION
 -------------
@@ -161,10 +163,16 @@ WHY IT IS BUILT THIS WAY (three bugs' worth of hard-won detail)
   changes to a directory's *direct* children -- there is no recursive watch on
   Linux, and putting one on every subdirectory would exhaust the inotify limit
   on any real disk.  So when a watched directory changes, the cached total for
-  that directory AND for every one of its ancestors is dropped, because a file
-  written three levels down changes all of their totals.  That is what makes
-  deep changes show up despite shallow watches.  Watches are bounded by
-  MONITOR_LIMIT and evicted least-recently-used.
+  that directory AND for every one of its ancestors is marked out of date,
+  because a file written three levels down changes all of their totals, and
+  any of those folders that is on screen is re-measured and redrawn.
+
+  What gets watched: every folder shown as a row, and -- if its whole tree
+  has at most DEEP_SCAN_LIMIT directories -- every directory inside it too.
+  Small trees are where people are actively putting files; big ones are where
+  a watch per directory would spend the inotify budget fastest.  Both sets
+  are bounded (MONITOR_LIMIT, DEEP_WATCH_LIMIT) and evicted
+  least-recently-used.
 
 KNOWN LIMITATIONS (by design, called out so they don't surprise you)
 --------------------------------------------------------------------
@@ -174,11 +182,16 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
   belonging to your account rather than to the package, so removing the
   package leaves it set.  Untick it, or run
   `gsettings reset org.gnome.nautilus.list-view default-visible-columns`.
-* Deep changes are only noticed in directories currently being watched (the
-  ones you have visited recently, up to MONITOR_LIMIT).  Change a file three
-  levels below a folder nobody is watching and its cached total stays stale
-  until the folder's own mtime changes or the cache entry ages out.  Reload
-  the window (Ctrl+R) to force a recount.
+* Deep changes inside a BIG folder (more than DEEP_SCAN_LIMIT directories)
+  are only noticed at its top level.  Change a file two levels below such a
+  folder and its total stays as it was until the folder's own mtime changes.
+  Reload the window (Ctrl+R) to force a recount.  Small folders are watched
+  all the way down and update on their own.
+* Clicking any column header, not only this one, can leave the list scrolled
+  a few rows down instead of at the top.  That is Nautilus, with or without
+  this extension: after a sort it keeps its invisibly focused row in view,
+  which is the first row of the PREVIOUS order.  Nautilus issue #2804, open
+  since 2023 and still reproducible on Nautilus 50.1.
 * Clicking the "Total Size" header sorts numerically, but not because the
   extension API offers a way to say so -- it does not.  Nautilus compares the
   strings an extension gives it with strcmp() and draws those same strings, so
@@ -344,7 +357,7 @@ if NAUTILUS_ABI is None:
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -379,6 +392,29 @@ WATCHDOG_INTERVAL_S = 5   # how often to look for lost work
 STUCK_SECONDS = 45        # a measurement taking this long was lost, not slow
 REQUEUE_LIMIT = 2         # give up rather than pile duplicates onto the queue
 MONITOR_LIMIT = 256       # max directories watched at once (inotify is finite)
+# Watches BELOW the folders on screen, so a file landing in Downloads/X/sub/
+# updates X's total while you are looking at Downloads.  A folder is watched
+# all the way down only if its whole tree has at most DEEP_SCAN_LIMIT
+# directories; anything bigger keeps just the one watch on itself.  Small
+# trees are where people are actively putting files, and a big tree is the
+# case where one watch per directory would spend the inotify budget fastest.
+DEEP_SCAN_LIMIT = 32      # directories per folder, beyond which: top only
+DEEP_WATCH_LIMIT = 512    # total watches below displayed folders (LRU)
+# A changed folder is re-measured this soon at the earliest, and never more
+# often than REFRESH_COST_FACTOR times as long as its last measurement took.
+# The second bound is what stops a long download into a large folder from
+# keeping one worker permanently busy re-measuring it.
+REFRESH_MIN_MS = 1000
+REFRESH_COST_FACTOR = 4
+REFRESH_MAX_MS = 30000
+# A cached total that is known to be out of date, but still worth showing
+# while its replacement is measured.  No real directory has this mtime, so it
+# can never be served as a cache hit, and the loader already reads it.
+STALE_MTIME = -1
+# While any background work is outstanding, the main thread briefly lets go of
+# the GIL this often, for this long, so worker threads can run.  See _pump.
+PUMP_INTERVAL_MS = 20
+PUMP_SLEEP_S = 0.001
 SAVE_DELAY_S = 10         # quiet period before the cache is written to disk
 WORKER_BACKOFF_S = 0.1    # pause after an unexpected worker error, see below
 
@@ -817,6 +853,39 @@ def _measure_with_walk(path):
     return total
 
 
+def _small_tree(root, limit):
+    """Every directory below `root`, or None if there are more than `limit`.
+
+    Stops the moment it finds more than `limit`, so however large the tree,
+    this reads at most limit + 1 directories: each one it reads it found
+    first, and it stops counting at the limit.
+
+    Symlinks are not followed, for the same reason the measurement does not
+    follow them.  A change behind a link does not change this folder's
+    total, so watching it would only buy a re-measure that finds nothing.
+    Unreadable directories are skipped rather than fatal.
+    """
+    found = []
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    found.append(entry.path)
+                    if len(found) > limit:
+                        return None
+                    pending.append(entry.path)
+        except OSError:
+            continue
+    return found
+
+
 def directory_size(path, cancellable=None):
     """Recursive size of `path`, preferring GIO and falling back to os.walk."""
     try:
@@ -1134,6 +1203,18 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._requeues = {}           # path -> times the watchdog re-queued it
         self._awaiting_reread = set()  # paths nudged but not yet re-asked for
         self._monitors = OrderedDict()  # path -> Gio.FileMonitor (LRU)
+        # Folders currently shown as rows, so that a change underneath one
+        # can be pushed back into its cell -- see _on_fs_change for why that
+        # is not something Nautilus does by itself.
+        self._rows = OrderedDict()      # path -> Nautilus.FileInfo (LRU)
+        self._cost = {}                 # path -> seconds its last measure took
+        self._refresh_due = set()       # rows to re-measure at the next tick
+        self._refresh_id = None
+        self._deep = OrderedDict()      # path -> Gio.FileMonitor (LRU)
+        self._scanned = set()           # rows whose trees have been listed
+        self._scans_pending = 0         # scan jobs not yet back on this thread
+        self._saves_pending = 0         # save threads not yet back
+        self._pump_id = None
         self._watchdog_id = None
         self._save_id = None
         self._dirty = False
@@ -1145,6 +1226,7 @@ class ShowFolderSizeColumn(GObject.GObject,
         _ensure_column_visible()
         threading.Thread(target=self._load_cache_worker,
                          name="show-folder-size-load", daemon=True).start()
+        self._pump_start()
 
     def _load_cache_worker(self):
         """Read the cache off the main thread, then hand it over."""
@@ -1252,6 +1334,7 @@ class ShowFolderSizeColumn(GObject.GObject,
             return "", None, 0
 
         mtime_ns = info.st_mtime_ns
+        self._remember_row(path, file_info)
         cached = self._cache.get(path)
         if cached is not None and cached[0] == mtime_ns:
             self._cache.move_to_end(path)
@@ -1259,9 +1342,33 @@ class ShowFolderSizeColumn(GObject.GObject,
             # any pending retry can stop.
             self._awaiting_reread.discard(path)
             self._watch(path)
+            self._scan_tree(path)
             return (cell_value(cached[1]) if cached[1] >= 0 else ""), None, 0
 
+        # Out of date.  If there is an older total, keep showing it while the
+        # new one is measured, rather than flipping to "Calculating...".  The
+        # placeholder sorts as zero, so in a view sorted by this column every
+        # update used to send the row to the far end and back again -- and a
+        # number that is a few seconds old is more use to look at than no
+        # number at all.  Only a folder never measured says "Calculating...".
+        if cached is not None and cached[1] >= 0:
+            return cell_value(cached[1]), path, mtime_ns
         return cell_value(0, PENDING_TEXT), path, mtime_ns
+
+    def _remember_row(self, path, file_info):
+        """Hold on to the FileInfo for a folder shown as a row, LRU-bounded.
+
+        Holding it is what lets a filesystem change reach the cell: without
+        one, the only way to get Nautilus to call us again is for it to
+        decide on its own that the folder changed, and for a change inside
+        the folder it never does.
+        """
+        self._rows[path] = file_info
+        self._rows.move_to_end(path)
+        while len(self._rows) > MONITOR_LIMIT:
+            old_path, _info = self._rows.popitem(last=False)
+            self._cost.pop(old_path, None)
+            self._scanned.discard(old_path)
 
     # -- background work -----------------------------------------------------
 
@@ -1276,7 +1383,7 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._jobs[path] = [file_info]
         self._queued_at[path] = time.monotonic()
         self._start_workers()
-        self._work_queue.put((path, mtime_ns))
+        self._work_queue.put(("measure", path, mtime_ns))
         self._start_watchdog()
         _log("queued %s" % (path,))
 
@@ -1336,7 +1443,7 @@ class ShowFolderSizeColumn(GObject.GObject,
             self._queued_at[path] = now
             self._requeues[path] = attempts + 1
             self._start_workers()
-            self._work_queue.put((path, mtime_ns))
+            self._work_queue.put(("measure", path, mtime_ns))
 
         return GLib.SOURCE_CONTINUE
 
@@ -1346,6 +1453,47 @@ class ShowFolderSizeColumn(GObject.GObject,
         self._queued_at.pop(path, None)
         self._requeues.pop(path, None)
         self._awaiting_reread.discard(path)
+
+    def _pump_start(self):
+        if self._pump_id is None:
+            self._pump_id = GLib.timeout_add(PUMP_INTERVAL_MS, self._pump)
+
+    def _busy(self):
+        return (bool(self._jobs) or self._scans_pending > 0
+                or self._saves_pending > 0 or not self._cache_loaded)
+
+    def _pump(self):
+        """Main thread: let worker threads have the GIL while there is work.
+
+        nautilus-python starts Python with Py_Initialize() and never calls
+        PyEval_SaveThread(), in 4.0 and in 4.1.0 alike.  So Nautilus' main
+        thread holds the GIL from then on, including while it sits idle in
+        its main loop waiting for input, and a worker thread that needs the
+        GIL simply waits.  It gets it only in the moments the main thread
+        happens to be running Python -- a callback, a timer, you doing
+        something -- and every measurement needs the GIL more than once.
+
+        Measured inside a real Nautilus 46.4: an EMPTY folder took 10.11s to
+        measure, then 4.00s, then 0.00s.  The same folder takes 0.0013s from
+        a plain Python process.  The 10.11s was two ticks of the 5s watchdog,
+        the 4.00s ended when the next folder was created, and the 0.00s was
+        measured while Nautilus was busy anyway.  The worker was never slow;
+        it was waiting for the GIL.  That goes a long way to explaining this
+        file's history of "Calculating..." that took an age to go away.
+
+        The proper fix is PyEval_SaveThread() after start-up, and that has to
+        happen in nautilus-python's C, not from inside a Python module that
+        is itself running under the GIL.  So instead: while there is work
+        outstanding, sleep for a millisecond every PUMP_INTERVAL_MS.
+        time.sleep() releases the GIL, a waiting worker takes it, and the
+        work gets done at its real speed.  When the work drains the timer
+        stops, so an idle Nautilus pays nothing at all.
+        """
+        if not self._busy():
+            self._pump_id = None
+            return GLib.SOURCE_REMOVE
+        time.sleep(PUMP_SLEEP_S)
+        return GLib.SOURCE_CONTINUE
 
     def _start_workers(self):
         """Ensure WORKER_COUNT live workers, replacing any that have died.
@@ -1364,6 +1512,7 @@ class ShowFolderSizeColumn(GObject.GObject,
             )
             thread.start()
             self._workers.append(thread)
+        self._pump_start()
 
     def _worker_loop(self):
         """Worker thread: measure, then hand the result to the main thread.
@@ -1377,7 +1526,13 @@ class ShowFolderSizeColumn(GObject.GObject,
         """
         while True:
             try:
-                path, mtime_ns = self._work_queue.get()
+                job = self._work_queue.get()
+                if job[0] == "scan":
+                    GLib.idle_add(self._on_scanned, job[1],
+                                  _small_tree(job[1], DEEP_SCAN_LIMIT),
+                                  priority=GLib.PRIORITY_DEFAULT)
+                    continue
+                _kind, path, mtime_ns = job
                 started = time.monotonic()
                 _log("start %s" % (path,))
 
@@ -1396,6 +1551,7 @@ class ShowFolderSizeColumn(GObject.GObject,
                 # PRIORITY_DEFAULT, not PRIORITY_DEFAULT_IDLE: a busy Nautilus
                 # main loop will starve idle-priority callbacks indefinitely.
                 GLib.idle_add(self._on_result, path, mtime_ns, num_bytes,
+                              time.monotonic() - started,
                               priority=GLib.PRIORITY_DEFAULT)
             except Exception as exc:                  # never let a worker die
                 _log("worker recovered from %r" % (exc,))
@@ -1406,8 +1562,10 @@ class ShowFolderSizeColumn(GObject.GObject,
                 # the point; surviving quietly and cheaply is the whole point.
                 time.sleep(WORKER_BACKOFF_S)
 
-    def _on_result(self, path, mtime_ns, num_bytes):
+    def _on_result(self, path, mtime_ns, num_bytes, seconds=0.0):
         """Main thread: cache the answer, then get Nautilus to re-read it."""
+        if path in self._rows:
+            self._cost[path] = seconds
         self._cache[path] = (mtime_ns, num_bytes)
         self._cache.move_to_end(path)
         self._dirty_shards.add(shard_for(path))
@@ -1418,6 +1576,8 @@ class ShowFolderSizeColumn(GObject.GObject,
             self._dirty_shards.add(shard_for(evicted))
         self._schedule_save()
         self._watch(path)
+        if path in self._rows:
+            self._scan_tree(path)
 
         text = cell_value(num_bytes) if num_bytes >= 0 else ""
         self._queued_at.pop(path, None)
@@ -1468,8 +1628,10 @@ class ShowFolderSizeColumn(GObject.GObject,
         if CACHE_PATH and os.path.exists(CACHE_PATH):
             shards = None
 
+        self._saves_pending += 1
         threading.Thread(target=self._save_worker, args=(shards,),
                          name="show-folder-size-save", daemon=True).start()
+        self._pump_start()
         return GLib.SOURCE_REMOVE
 
     def _save_worker(self, shards):
@@ -1492,20 +1654,29 @@ class ShowFolderSizeColumn(GObject.GObject,
         need to be.  Entries are independent, and one that is a moment stale
         fails its mtime check and gets measured again.
         """
+        failed = None
         try:
-            if save_cache(list(self._cache.items()), shards=shards):
-                return
-            failed = shards
+            if not save_cache(list(self._cache.items()), shards=shards):
+                failed = shards
         except Exception as exc:
             _log("save failed: %r" % (exc,))
             failed = shards
+        # Always report back, success included: the pump keeps the GIL
+        # moving until every save thread has finished, and it can only know
+        # this one has if it hears so.
+        GLib.idle_add(self._on_saved, failed, priority=GLib.PRIORITY_DEFAULT)
 
-        # A shard that failed to write is still stale on disk, and its dirty
-        # mark has already been taken. Put it back, or the entry sits
-        # unwritten until something unrelated happens to touch that shard.
+    def _on_saved(self, failed):
+        """Main thread: a save finished.  Re-mark any shard it could not write.
+
+        A shard that failed to write is still stale on disk, and its dirty
+        mark has already been taken.  Put it back, or the entry sits
+        unwritten until something unrelated happens to touch that shard.
+        """
+        self._saves_pending -= 1
         if failed:
-            GLib.idle_add(self._requeue_shards, failed,
-                          priority=GLib.PRIORITY_DEFAULT)
+            self._requeue_shards(failed)
+        return GLib.SOURCE_REMOVE
 
     def _requeue_shards(self, shards):
         self._dirty_shards.update(shards)
@@ -1519,14 +1690,12 @@ class ShowFolderSizeColumn(GObject.GObject,
         if path in self._monitors:
             self._monitors.move_to_end(path)
             return
-        try:
-            monitor = Gio.File.new_for_path(path).monitor_directory(
-                Gio.FileMonitorFlags.WATCH_MOVES, None)
-        except GLib.Error as error:
-            _log("cannot watch %s: %s" % (path, error.message))
+        # Promote rather than duplicate: a folder watched from below as part
+        # of a small tree has become a row, and two monitors on one directory
+        # would report every change twice.
+        monitor = self._deep.pop(path, None) or self._new_monitor(path)
+        if monitor is None:
             return
-
-        monitor.connect("changed", self._on_fs_change)
         self._monitors[path] = monitor
 
         while len(self._monitors) > MONITOR_LIMIT:
@@ -1534,14 +1703,111 @@ class ShowFolderSizeColumn(GObject.GObject,
             old_monitor.cancel()
             _log("stopped watching %s (limit reached)" % old_path)
 
+    def _watch_deep(self, path):
+        """Watch a directory BELOW a row, in its own LRU budget.
+
+        Kept apart from _monitors so that one big-but-under-the-limit tree
+        cannot evict the watches on the rows you are actually looking at.
+        """
+        if path in self._monitors:
+            return                        # already watched, as a row
+        if path in self._deep:
+            self._deep.move_to_end(path)
+            return
+        monitor = self._new_monitor(path)
+        if monitor is None:
+            return
+        self._deep[path] = monitor
+
+        while len(self._deep) > DEEP_WATCH_LIMIT:
+            _old_path, old_monitor = self._deep.popitem(last=False)
+            old_monitor.cancel()
+
+    def _new_monitor(self, path):
+        try:
+            monitor = Gio.File.new_for_path(path).monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES, None)
+        except GLib.Error as error:
+            _log("cannot watch %s: %s" % (path, error.message))
+            return None
+        monitor.connect("changed", self._on_fs_change)
+        return monitor
+
+    def _scan_tree(self, path):
+        """Once per row: list its tree on a worker, then watch it if small.
+
+        On a worker because even a bounded listing is directory reads, and
+        _resolve runs on the GTK main thread.  The monitors themselves are
+        created back on the main thread in _on_scanned: a GFileMonitor emits
+        "changed" in the main context of the thread that created it, and a
+        worker thread has no main loop to deliver it to.
+        """
+        if path in self._scanned:
+            return
+        self._scanned.add(path)
+        self._scans_pending += 1
+        self._start_workers()
+        self._work_queue.put(("scan", path))
+
+    def _on_scanned(self, root, found):
+        """Main thread: arm the watches a scan found, if the tree was small."""
+        self._scans_pending -= 1
+        if root not in self._rows:
+            return GLib.SOURCE_REMOVE       # scrolled away or closed meanwhile
+        if found is None:
+            # A tree can outgrow the limit after it was first scanned -- say,
+            # caught halfway through an archive extracting into it.  Then the
+            # watches armed on that earlier, smaller listing have to go too,
+            # or "top only" is not true and they sit in the budget until LRU
+            # eviction happens to reach them.
+            prefix = root.rstrip(os.sep) + os.sep
+            for path in [p for p in self._deep if p.startswith(prefix)]:
+                self._deep.pop(path).cancel()
+            _log("%s has more than %d folders; watching it at the top only"
+                 % (root, DEEP_SCAN_LIMIT))
+            return GLib.SOURCE_REMOVE
+        for directory in found:
+            self._watch_deep(directory)
+        if found:
+            _log("watching %d folder(s) below %s" % (len(found), root))
+        return GLib.SOURCE_REMOVE
+
+    def _invalidate(self, path, remove=False):
+        """Mark a cached total out of date, or drop it.  True if it changed.
+
+        Marking keeps the number: it is still the best thing to show until
+        the new one is measured (see _resolve).  Only a folder that is
+        actually gone is dropped -- keeping an entry for a deleted directory
+        would write it back to disk and carry it forever.
+        """
+        cached = self._cache.get(path)
+        if cached is None:
+            return False
+        if remove:
+            del self._cache[path]
+        elif cached[0] == STALE_MTIME:
+            return False
+        else:
+            self._cache[path] = (STALE_MTIME, cached[1])
+        self._dirty_shards.add(shard_for(path))
+        return True
+
     def _on_fs_change(self, _monitor, changed_file, _other, event_type):
-        """Something changed under a watched directory: drop stale totals.
+        """Something changed under a watched directory: re-measure and redraw.
 
         A watch only sees direct children, so the change is attributed to the
         containing directory and then walked up: a file written three levels
-        down changes the total of every ancestor, and dropping only the
+        down changes the total of every ancestor, and updating only the
         immediate one would leave the folder you are actually looking at
         showing a stale number.
+
+        Marking the totals stale is only half of it, and for a long time it
+        was the only half.  Nautilus does not ask an extension for a value
+        again unless it thinks the file itself changed, and a file written
+        INSIDE a folder does not make Nautilus think the folder changed -- it
+        watches the directory you are viewing, not the folders in it.  So the
+        stale total was thrown away and the cell kept showing it until you
+        navigated away and back.  _schedule_refresh closes that loop.
         """
         if event_type == Gio.FileMonitorEvent.CHANGES_DONE_HINT:
             return                       # already handled by the CHANGED event
@@ -1550,45 +1816,101 @@ class ShowFolderSizeColumn(GObject.GObject,
         if not path:
             return
 
-        # Drop the changed thing's own entry first, then walk up from its
-        # parent.  The old code decided where to start with os.path.isdir(),
-        # which is both a stat syscall per event -- and there is one event per
-        # write, so a single download can fire hundreds -- and wrong in the
-        # case that matters: a directory that has just been DELETED is no
-        # longer a directory, so isdir() says False, the walk started at its
-        # parent, and the dead directory's own cached total stayed in the
-        # cache (and got written back to disk) for good.  A path that names a
-        # file is simply not a key here, so popping it unconditionally costs
-        # nothing.
-        dropped = 0
-        if self._cache.pop(path, None) is not None:
-            dropped += 1
-            self._dirty_shards.add(shard_for(path))
+        gone = event_type in (Gio.FileMonitorEvent.DELETED,
+                              Gio.FileMonitorEvent.MOVED_OUT)
 
+        # The changed thing itself, then every ancestor.  The changed thing
+        # is looked up unconditionally rather than after an isdir() check:
+        # that was a stat syscall per event -- and there is one event per
+        # write, so a single download can fire hundreds -- and wrong in the
+        # case that matters, because a directory that has just been DELETED
+        # is no longer a directory.  A path that names a file is simply not a
+        # key here, so looking it up costs nothing.
+        affected = [path]
         directory = os.path.dirname(path)
         while True:
-            if self._cache.pop(directory, None) is not None:
-                dropped += 1
-                self._dirty_shards.add(shard_for(directory))
+            affected.append(directory)
             parent = os.path.dirname(directory)
             if parent == directory:
                 break
             directory = parent
 
+        changed = 0
+        for index, candidate in enumerate(affected):
+            if self._invalidate(candidate, remove=gone and index == 0):
+                changed += 1
+
         # A watched directory that goes away keeps its GFileMonitor alive
         # otherwise, holding an inotify watch on a dead inode and a slot
-        # against MONITOR_LIMIT that nothing will ever reclaim, since the LRU
+        # against the limit that nothing will ever reclaim, since the LRU
         # eviction only runs when a *new* watch is added.
-        if event_type in (Gio.FileMonitorEvent.DELETED,
-                          Gio.FileMonitorEvent.MOVED_OUT):
-            monitor = self._monitors.pop(path, None)
-            if monitor is not None:
-                monitor.cancel()
-                _log("stopped watching %s (it is gone)" % path)
+        if gone:
+            for watches in (self._monitors, self._deep):
+                monitor = watches.pop(path, None)
+                if monitor is not None:
+                    monitor.cancel()
+                    _log("stopped watching %s (it is gone)" % path)
+            self._rows.pop(path, None)
+            self._cost.pop(path, None)
+            self._scanned.discard(path)
 
-        if dropped:
+        if changed:
             self._schedule_save()
-            _log("%s changed; dropped %d cached total(s)" % (path, dropped))
+            _log("%s changed; %d cached total(s) out of date" % (path, changed))
+        self._schedule_refresh(affected[1:] if gone else affected)
+
+    def _schedule_refresh(self, paths):
+        """Re-measure the rows among `paths`, throttled.
+
+        Throttled, not debounced.  A debounce waits for quiet, so a folder
+        receiving a long download would show its old size until the download
+        finished; a throttle updates it as it goes.  The interval grows with
+        what the last measurement cost, so a big folder is re-measured less
+        often than a small one and never keeps a worker permanently busy.
+        """
+        due = [path for path in paths if path in self._rows]
+        if not due:
+            return
+        self._refresh_due.update(due)
+        if self._refresh_id is not None:
+            return
+        slowest = max(self._cost.get(path, 0.0) for path in self._refresh_due)
+        delay_ms = int(min(REFRESH_MAX_MS,
+                           max(REFRESH_MIN_MS,
+                               slowest * REFRESH_COST_FACTOR * 1000)))
+        self._refresh_id = GLib.timeout_add(delay_ms, self._refresh_rows)
+
+    def _refresh_rows(self):
+        """Timer: queue a fresh measurement for each row that changed.
+
+        This queues the work directly instead of calling
+        invalidate_extension_info() and waiting for Nautilus to ask, which
+        is the round trip that proved unreliable enough to need _nudge.  The
+        cell keeps its old number meanwhile; _on_result writes the new one
+        and nudges, exactly as for any other measurement.
+        """
+        self._refresh_id = None
+        due, self._refresh_due = self._refresh_due, set()
+        busy = []
+        for path in due:
+            file_info = self._rows.get(path)
+            if file_info is None:
+                continue
+            if path in self._jobs:
+                # A measurement already in flight may have started before
+                # the change and would cache the old answer.  Come back for
+                # this one once it lands rather than joining it.
+                busy.append(path)
+                continue
+            try:
+                mtime_ns = os.lstat(path).st_mtime_ns
+            except OSError:
+                continue                          # gone; its event says so
+            self._scanned.discard(path)           # it may have new folders
+            self._enqueue(path, mtime_ns, file_info)
+        if busy:
+            self._schedule_refresh(busy)
+        return GLib.SOURCE_REMOVE
 
     def _nudge(self, path, file_infos, attempt):
         """Ask Nautilus to re-read the value, retrying a bounded few times.

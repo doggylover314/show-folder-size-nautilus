@@ -34,6 +34,9 @@ run "compile: every python file parses" \
 run "sort key: numeric ordering, and that it draws as nothing" \
     python3 "${HERE}/test_sort_key.py"
 
+run "live updates: a change on disk reaches the cell" \
+    python3 "${HERE}/test_live_updates.py"
+
 run "ABI selection (no network needed)" \
     python3 "${HERE}/test_abi_selection.py"
 

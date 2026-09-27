@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached on disk, so browsing never
 blocks and a folder measured once stays instant across restarts. While a
 folder is being measured the column reads `Calculating...`.
 
-> **Status: v1.1.0.** Install the `.deb` or the `.rpm` by double-clicking it,
+> **Status: v1.1.1.** Install the `.deb` or the `.rpm` by double-clicking it,
 > run `nautilus -q`, and the column is there — it enables itself on first
 > load. Measurement uses the same GIO call as Nautilus' Properties window, and
 > sizes are formatted exactly like the built-in Size column. **Clicking the
@@ -46,7 +46,7 @@ nautilus -q   # closes open windows; next launch loads the extension
 On Fedora the terminal equivalent is:
 
 ```bash
-sudo dnf install ./show-folder-size-nautilus-1.1.0-1.fc42.noarch.rpm
+sudo dnf install ./show-folder-size-nautilus-1.1.1-1.fc42.noarch.rpm
 nautilus -q
 ```
 
@@ -515,17 +515,52 @@ means "nobody chose", empty means "chose nothing").
 
 ## Filesystem monitoring
 
-Directories you visit are watched with `GFileMonitor`. When one changes, the
-cached total for it **and every ancestor** is dropped — a file written three
-levels down changes all of their totals, so invalidating only the immediate
-directory would leave the folder you're looking at showing a stale number.
+Sizes update while you watch. Drop a file into `Downloads/Project/assets/`
+with Downloads open and the Project row changes within about a second — no
+navigating away and back.
 
-Linux has no recursive watch, and putting one on every subdirectory would
-exhaust the inotify limit on any real disk. So watches are bounded
-(`MONITOR_LIMIT`, 256) and evicted least-recently-used. The practical
-consequence: **deep changes are noticed in directories you've visited
-recently**. Change something far below a folder nobody is watching and its
-total stays cached until its own mtime changes. `Ctrl+R` forces a recount.
+Every folder shown as a row is watched with `GFileMonitor`, and so is every
+directory inside it, **if its whole tree has at most 32 directories**
+(`DEEP_SCAN_LIMIT`). Small trees are where people are actively putting files;
+a big tree is where one watch per directory would spend the inotify budget
+fastest. Linux has no recursive watch, so this is the compromise: a big
+folder is watched at its top level only, and a change further down it shows
+up the next time its own mtime changes, or on `Ctrl+R`.
+
+When something changes, the total for that directory **and every ancestor**
+is marked out of date, and any of them that is on screen is re-measured. The
+old size stays in the cell until the new one arrives, rather than flipping to
+`Calculating...` — which sorts as zero, so in a view sorted by Total Size it
+used to send the row to the far end of the list and back on every update.
+
+Re-measuring is throttled: at most once a second, and never more often than
+four times as long as that folder last took to measure, so a long download
+into a large folder cannot keep a worker permanently busy. Both sets of
+watches are bounded (`MONITOR_LIMIT` 256 and `DEEP_WATCH_LIMIT` 512) and
+evicted least-recently-used.
+
+**Before 1.1.1 none of this reached the screen.** Changes were detected and
+the stale total thrown away, but nothing told Nautilus, so the cell kept the
+old number until you left the folder. Nautilus only asks an extension for a
+value again when it thinks the file itself changed, and a file written inside
+a folder never makes it think so.
+
+### Why measuring used to be slow inside Nautilus
+
+nautilus-python starts Python with `Py_Initialize()` and never releases the
+GIL afterwards, in 4.0 and in Fedora's 4.1.0 alike. So Nautilus's main thread
+holds it even while idle, and the threads that measure folders can only run
+in the moments Nautilus happens to be executing Python. Inside a real
+Nautilus 46.4, an **empty** folder took 10.11 seconds to measure; the same
+folder takes 0.0013s from a plain Python process.
+
+Since 1.1.1, while any measurement is outstanding, the extension sleeps for a
+millisecond every 20ms on the main thread, which hands the GIL to whichever
+worker is waiting. The same empty folder now takes 0.02s. When the work
+drains the timer stops: an idle Nautilus measured at 0 CPU ticks over 10
+seconds. The real fix belongs in nautilus-python's C, where the GIL can be
+released after start-up; from inside a Python module that is itself running
+under the GIL, this is as close as it gets.
 
 ## Known issues
 
@@ -541,8 +576,17 @@ total stays cached until its own mtime changes. `Ctrl+R` forces a recount.
   [Sorting by size](#sorting-by-size). Everything the extension can check
   about that is checked, but if a font or toolkit somewhere does render them,
   the switch in **Folder Size Setup** turns it off.
-- **Deep changes are only caught in watched directories** — see
-  [Filesystem monitoring](#filesystem-monitoring) for the bound and why.
+- **Changes deep inside a big folder are only caught at its top level.**
+  Folders with at most 32 directories are watched all the way down; bigger
+  ones are not, to save the inotify budget. See
+  [Filesystem monitoring](#filesystem-monitoring). `Ctrl+R` forces a recount.
+- **Sorting can leave the list scrolled a few rows down.** Click any column
+  header, built-in ones included, and Nautilus keeps its invisibly focused
+  row in view, which is the first row of the *previous* order. It happens
+  with this extension uninstalled too, and it's
+  [Nautilus #2804](https://gitlab.gnome.org/GNOME/nautilus/-/issues/2804),
+  open since 2023 and still reproducible on Nautilus 50.1. Scroll up after
+  sorting.
 - **Live measurement crosses mount points**, so a folder containing a mounted
   volume includes that volume's contents. This is the column, not the indexer:
   `show-folder-size-index` stops at mount boundaries unless told otherwise, so

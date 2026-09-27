@@ -19,10 +19,31 @@ wrong on the newest releases. Hence these.
 
 | File | Needs fixtures | Proves |
 |---|---|---|
+| `test_live_updates.py` | no | a change on disk reaches the cell: deep watches, redraws, stale-while-measuring, the GIL pump |
 | `test_sort_key.py` | no | the "Total Size" header sorts numerically, and the key that makes it do so draws as nothing |
 | `test_abi_selection.py` | no | the right ABI is chosen, on every combination of what might be installed |
 | `test_abi_live.py` | yes | the registration path runs on ABIs this machine does not have |
 | `fetch-abi-fixtures.sh` | — | downloads and extracts the real libraries to make the above possible |
+
+### `test_live_updates.py`
+
+Four bugs, each found by running the extension inside a real Nautilus 46.4
+under Xvfb and each tested here without one:
+
+- a file written inside a subfolder of a row was never noticed;
+- a change that *was* noticed never reached the screen;
+- a row being re-measured flipped to `Calculating...`, which sorts as zero,
+  so sorted views jumped;
+- worker threads starved for the GIL whenever Nautilus was idle.
+
+The provider's methods are called with a stand-in for `self`, so this needs
+no file manager, display or main loop. What it cannot show is the cell
+visibly changing; that was checked live, by writing into
+`Printouts for Skit/a/` with its parent open and watching the row go from
+`0 bytes` to `5.2 MB` and re-sort, with no navigation.
+
+Every fix was also reverted one at a time on a scratch copy to confirm the
+test fails without it.
 
 ### `test_sort_key.py`
 

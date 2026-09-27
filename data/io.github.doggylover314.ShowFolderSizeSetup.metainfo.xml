@@ -70,6 +70,19 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.1" date="2026-09-27">
+      <description>
+        <p>
+          Folder sizes now update on screen when files change, including
+          files added inside a subfolder. They used to stay at the old
+          number until you left the folder.
+        </p>
+        <p>
+          Measuring no longer stalls while the file manager is idle. An empty
+          folder could take ten seconds to show its size.
+        </p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-10">
       <description>
         <p>

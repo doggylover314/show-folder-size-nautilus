@@ -24,7 +24,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import types
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -44,59 +43,10 @@ def skip(label, why):
     skips.append(label)
 
 
-def load_extension():
-    """Import show_folder_size with Nautilus stubbed out.
-
-    gi.require_version is made to say yes to Nautilus, and a module holding
-    two GInterface subclasses is put where `from gi.repository import
-    Nautilus` will find it.  GInterface and not a plain class: the provider
-    subclasses both, and GObject's metaclass will not register a type over a
-    base that is not a GObject one.
-    """
-    import gi
-    from gi.repository import GObject
-
-    real_require = gi.require_version
-
-    def require(namespace, version):
-        if namespace == "Nautilus":
-            return None
-        return real_require(namespace, version)
-
-    gi.require_version = require
-
-    stub = types.ModuleType("gi.repository.Nautilus")
-
-    class ColumnProvider(GObject.GInterface):
-        pass
-
-    class InfoProvider(GObject.GInterface):
-        pass
-
-    class Column(GObject.GObject):
-        pass
-
-    class OperationResult:
-        COMPLETE = 0
-
-    stub.ColumnProvider = ColumnProvider
-    stub.InfoProvider = InfoProvider
-    stub.Column = Column
-    stub.OperationResult = OperationResult
-    sys.modules["gi.repository.Nautilus"] = stub
-
-    sys.path.insert(0, REPO)
-    import show_folder_size
-    return show_folder_size
-
-
 try:
-    import warnings
-    with warnings.catch_warnings():
-        # The stub interfaces have no implementation support, which GObject
-        # says out loud. Nothing here calls into them.
-        warnings.simplefilter("ignore", RuntimeWarning)
-        m = load_extension()
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from nautilus_stub import load_extension
+    m = load_extension()
 except Exception as exc:
     print("SKIP: cannot import the extension here: %r" % (exc,))
     print("      (needs PyGObject; nautilus itself is not required)")

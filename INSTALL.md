@@ -16,7 +16,7 @@ the defaults gave you.
 **Debian, Ubuntu, Mint, Pop!\_OS:**
 
 ```bash
-sudo apt install ./show-folder-size-nautilus_1.1.0_all.deb
+sudo apt install ./show-folder-size-nautilus_1.1.1_all.deb
 nautilus -q
 ```
 
@@ -43,7 +43,7 @@ the command line.
 **Fedora Workstation:**
 
 ```bash
-sudo dnf install ./show-folder-size-nautilus-1.1.0-1.fc42.noarch.rpm
+sudo dnf install ./show-folder-size-nautilus-1.1.1-1.fc42.noarch.rpm
 nautilus -q
 ```
 

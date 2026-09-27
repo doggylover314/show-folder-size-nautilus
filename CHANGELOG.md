@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-09-27
+
+Found by running the extension inside a real Nautilus for the first time.
+
+### Fixed
+- **Sizes didn't update on screen.** A change was detected and the old total
+  thrown away, but nothing told Nautilus, so the cell kept the stale number
+  until you left the folder. Changed rows are now re-measured and redrawn.
+- **Files added inside a subfolder were missed.** Only the row itself was
+  watched, so `Downloads/X/sub/file` left X unchanged — the "2 items, 0 bytes"
+  report. Folders with up to 32 directories are now watched all the way down.
+- **Measuring stalled while Nautilus was idle.** nautilus-python never
+  releases the GIL, so worker threads only ran when Nautilus happened to be
+  executing Python. An empty folder took 10.11s; it now takes 0.02s. A timer
+  hands workers the GIL while there is work, and stops when there isn't.
+- **Updated rows jumped around in a sorted view.** Re-measuring showed
+  `Calculating...`, which sorts as zero. Rows now keep their old size until
+  the new one lands.
+
+### Not fixed, and not ours
+- Sorting by any column can leave the list a few rows down. That's
+  [Nautilus #2804](https://gitlab.gnome.org/GNOME/nautilus/-/issues/2804);
+  it happens with this extension uninstalled.
+
 ## [1.1.0] - 2026-09-10
 
 Clicking the **Total Size** header now sorts by size, and there is an `.rpm`
@@ -666,7 +690,8 @@ on Ubuntu (ext4).
   extension API.
 - Cached totals go stale on changes deeper than the folder's direct children.
 
-[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/doggylover314/show-folder-size-nautilus/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.1
 [1.1.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.1.0
 [1.0.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v1.0.0
 [0.6.0]: https://github.com/doggylover314/show-folder-size-nautilus/releases/tag/v0.6.0
