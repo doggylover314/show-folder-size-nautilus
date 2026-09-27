@@ -58,7 +58,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq rpm createrepo-c apt-utils dpkg-dev gnupg \
             desktop-file-utils python3-gi gir1.2-pango-1.0 python3-gi-cairo \
-            fonts-dejavu-core
+            fonts-dejavu-core gir1.2-nautilus-4.0 gir1.2-gtk-3.0
+
+      # The real libnautilus-extension builds from other releases, so the ABI
+      # tests run instead of skipping. They come from the Ubuntu archive, which
+      # drops old versions; a download failure there must not block a release.
+      - name: Fetch ABI test fixtures
+        run: tests/fetch-abi-fixtures.sh || echo "::warning::ABI fixtures unavailable; those tests will skip"
 
       - name: Tests
         run: tests/run-tests.sh

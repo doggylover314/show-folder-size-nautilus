@@ -201,24 +201,25 @@ stale version in either.
 **One-time setup**, from any machine with `gpg` and `gh` logged in:
 
 ```bash
-# 1. The signing key. No passphrase, because CI signs unattended.
-gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
-  "show-folder-size-nautilus packages <doggylover314@users.noreply.github.com>" \
-  default default never
+# 1. The signing key. No passphrase, because CI signs unattended. Skipped if
+#    it already exists, so running this twice can't make a second key.
+gpg --list-secret-keys "show-folder-size-nautilus packages" >/dev/null 2>&1 ||
+  gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
+    "show-folder-size-nautilus packages <doggylover314@users.noreply.github.com>" \
+    default default never
 
 # 2. Give it to the workflow.
 gpg --armor --export-secret-keys "show-folder-size-nautilus packages" \
   | gh secret set SIGNING_KEY --repo doggylover314/show-folder-size-nautilus
 
-# 3. Turn on GitHub Pages, published by Actions.
-gh api -X POST repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow
+# 3. Publish GitHub Pages from Actions. POST creates Pages; if it already
+#    exists (deploying from a branch), PUT switches it over.
+gh api -X POST repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow 2>/dev/null \
+  || gh api -X PUT repos/doggylover314/show-folder-size-nautilus/pages -f build_type=workflow
 
 # 4. Publish the current version.
 gh workflow run release.yml --repo doggylover314/show-folder-size-nautilus
 ```
-
-If step 3 says Pages already exists, set **Settings → Pages → Source** to
-*GitHub Actions* instead.
 
 **Keep a copy of that key.** Every user's dnf and apt trust the key they
 imported the first time. Lose it and the next release fails their signature
