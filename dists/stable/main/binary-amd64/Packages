@@ -1,0 +1,42 @@
+Package: show-folder-size-nautilus
+Version: 1.1.2
+Architecture: all
+Maintainer: doggylover314 <doggylover314@users.noreply.github.com>
+Depends: python3 (>= 3.8), python3-nautilus, python3-gi, nautilus, debconf (>= 0.5) | debconf-2.0
+Recommends: gir1.2-gtk-4.0, gir1.2-adw-1
+Conflicts: nautilus-total-size
+Replaces: nautilus-total-size
+Provides: nautilus-total-size
+Filename: pool/main/s/show-folder-size-nautilus/show-folder-size-nautilus_1.1.2_all.deb
+Size: 84996
+MD5sum: bf6b5d08060c9938403a50d250794f35
+SHA1: 4fdbc2662734762347c64b96196c5b14e2658632
+SHA256: 86bd68a727796da14bb41dc7f2c660cd961834646247c204ba764677ab6223d1
+Section: gnome
+Priority: optional
+Homepage: https://github.com/doggylover314/show-folder-size-nautilus
+Description: Total Size column for GNOME Files showing recursive folder sizes
+ Adds an optional "Total Size" column to the Nautilus list view that shows the
+ recursive size of a folder's contents, the same number the Properties window
+ reports, instead of the built-in item count.
+ .
+ Sizes are measured in the background with Gio.File.measure_disk_usage and
+ cached on disk, so browsing never blocks and a folder measured once stays
+ instant across restarts. There is no network access and no subprocess use.
+ Writes are limited to the size cache, one marker file recording that the
+ column was enabled, and that column setting itself; the extension's header
+ comment lists each one and how to prevent it.
+ .
+ The column is enabled automatically the first time the extension loads, so
+ after installing you only need to run "nautilus -q". Untick it in List View
+ under the view menu, Visible Columns, if you would rather not have it.
+ .
+ Folder sizes are indexed at each login, in full the first time and then only
+ where something changed, after a short delay and at low priority. Each user
+ can switch that off or choose which folders it covers.
+ .
+ "Folder Size Setup" (show-folder-size-setup) is a small window for choosing
+ where sizes are cached, what the login indexing covers, and for pre-indexing
+ whole drives on the spot. The same indexing is available on the command line
+ as show-folder-size-index.
+

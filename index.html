@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>show-folder-size-nautilus packages</title>
+<h1>show-folder-size-nautilus</h1>
+<p>A Total Size column for GNOME Files. This site is its package repository;
+the project is at
+<a href="https://github.com/doggylover314/show-folder-size-nautilus">GitHub</a>.</p>
+<h2>Fedora</h2>
+<pre>sudo curl -fsSL -o /etc/yum.repos.d/show-folder-size-nautilus.repo \
+  https://doggylover314.github.io/show-folder-size-nautilus/rpm/show-folder-size-nautilus.repo
+sudo dnf install show-folder-size-nautilus</pre>
+<h2>Debian and Ubuntu</h2>
+<pre>sudo curl -fsSL -o /etc/apt/keyrings/show-folder-size-nautilus.gpg \
+  https://doggylover314.github.io/show-folder-size-nautilus/show-folder-size-nautilus.gpg
+echo "deb [signed-by=/etc/apt/keyrings/show-folder-size-nautilus.gpg] https://doggylover314.github.io/show-folder-size-nautilus stable main" \
+  | sudo tee /etc/apt/sources.list.d/show-folder-size-nautilus.list
+sudo apt update && sudo apt install show-folder-size-nautilus</pre>

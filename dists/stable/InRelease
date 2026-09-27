@@ -1,0 +1,58 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: all amd64 arm64 i386
+Codename: stable
+Components: main
+Date: Sun, 27 Sep 2026 16:40:28 +0000
+Description: Total Size column for GNOME Files
+Label: show-folder-size-nautilus
+Origin: show-folder-size-nautilus
+Suite: stable
+MD5Sum:
+ 64121edb4d2aaa2f3566ec7e0d0ae03a              236 Release
+ c02c47b06a30a65fba2c4a6fac04969a             2143 main/binary-all/Packages
+ f69300937a43c00c624c67cab4b2a539             1147 main/binary-all/Packages.gz
+ c02c47b06a30a65fba2c4a6fac04969a             2143 main/binary-amd64/Packages
+ f69300937a43c00c624c67cab4b2a539             1147 main/binary-amd64/Packages.gz
+ c02c47b06a30a65fba2c4a6fac04969a             2143 main/binary-arm64/Packages
+ f69300937a43c00c624c67cab4b2a539             1147 main/binary-arm64/Packages.gz
+ c02c47b06a30a65fba2c4a6fac04969a             2143 main/binary-i386/Packages
+ f69300937a43c00c624c67cab4b2a539             1147 main/binary-i386/Packages.gz
+SHA1:
+ 3f0390ccdd09c569fcd4f28eab752f86552f92a5              236 Release
+ ee114e0395546f34d49683eb755fa3c59d99c84f             2143 main/binary-all/Packages
+ ce2a6f1d7b2345a3d0b3da0c5cd88df5926ad905             1147 main/binary-all/Packages.gz
+ ee114e0395546f34d49683eb755fa3c59d99c84f             2143 main/binary-amd64/Packages
+ ce2a6f1d7b2345a3d0b3da0c5cd88df5926ad905             1147 main/binary-amd64/Packages.gz
+ ee114e0395546f34d49683eb755fa3c59d99c84f             2143 main/binary-arm64/Packages
+ ce2a6f1d7b2345a3d0b3da0c5cd88df5926ad905             1147 main/binary-arm64/Packages.gz
+ ee114e0395546f34d49683eb755fa3c59d99c84f             2143 main/binary-i386/Packages
+ ce2a6f1d7b2345a3d0b3da0c5cd88df5926ad905             1147 main/binary-i386/Packages.gz
+SHA256:
+ 951447d7cb7e4323d661d5c9ddcad7faafbea4cbeb12809e643927bdcafb09b4              236 Release
+ 3cb0a0d55143abb0566711e3897986eb249799d3653f4deb380873b480d4ced2             2143 main/binary-all/Packages
+ 1ecbfd643f16d9f392df0a94af275caeca0938183478007198e6b15611e3610b             1147 main/binary-all/Packages.gz
+ 3cb0a0d55143abb0566711e3897986eb249799d3653f4deb380873b480d4ced2             2143 main/binary-amd64/Packages
+ 1ecbfd643f16d9f392df0a94af275caeca0938183478007198e6b15611e3610b             1147 main/binary-amd64/Packages.gz
+ 3cb0a0d55143abb0566711e3897986eb249799d3653f4deb380873b480d4ced2             2143 main/binary-arm64/Packages
+ 1ecbfd643f16d9f392df0a94af275caeca0938183478007198e6b15611e3610b             1147 main/binary-arm64/Packages.gz
+ 3cb0a0d55143abb0566711e3897986eb249799d3653f4deb380873b480d4ced2             2143 main/binary-i386/Packages
+ 1ecbfd643f16d9f392df0a94af275caeca0938183478007198e6b15611e3610b             1147 main/binary-i386/Packages.gz
+SHA512:
+ ee94487b488ae0658db8a088826421281785d6345e57e3ef5a8f2e09a4b34a41cef0cb583bbdde8a9f6a6a1e87ac9c8ff37ee3896392cf1e93935d7a05a10b61              236 Release
+ 44d3a9e8e7bc2da04b4fb540a6eda0a3bf776b33d25a7cfb938a5bfca84985db205ea089ca8237ad0a2e91d7a0b2b1e35d045c6695c8fac71bfc69a0cb2762c2             2143 main/binary-all/Packages
+ 5bb75a43f92458a92a577b623a28a162ef98dac94648a81014d4933f2b1eff9e7b4df295b6aa1fb255b9f576f078dcab7c069ca51a0e6429f6fb92434e239d9b             1147 main/binary-all/Packages.gz
+ 44d3a9e8e7bc2da04b4fb540a6eda0a3bf776b33d25a7cfb938a5bfca84985db205ea089ca8237ad0a2e91d7a0b2b1e35d045c6695c8fac71bfc69a0cb2762c2             2143 main/binary-amd64/Packages
+ 5bb75a43f92458a92a577b623a28a162ef98dac94648a81014d4933f2b1eff9e7b4df295b6aa1fb255b9f576f078dcab7c069ca51a0e6429f6fb92434e239d9b             1147 main/binary-amd64/Packages.gz
+ 44d3a9e8e7bc2da04b4fb540a6eda0a3bf776b33d25a7cfb938a5bfca84985db205ea089ca8237ad0a2e91d7a0b2b1e35d045c6695c8fac71bfc69a0cb2762c2             2143 main/binary-arm64/Packages
+ 5bb75a43f92458a92a577b623a28a162ef98dac94648a81014d4933f2b1eff9e7b4df295b6aa1fb255b9f576f078dcab7c069ca51a0e6429f6fb92434e239d9b             1147 main/binary-arm64/Packages.gz
+ 44d3a9e8e7bc2da04b4fb540a6eda0a3bf776b33d25a7cfb938a5bfca84985db205ea089ca8237ad0a2e91d7a0b2b1e35d045c6695c8fac71bfc69a0cb2762c2             2143 main/binary-i386/Packages
+ 5bb75a43f92458a92a577b623a28a162ef98dac94648a81014d4933f2b1eff9e7b4df295b6aa1fb255b9f576f078dcab7c069ca51a0e6429f6fb92434e239d9b             1147 main/binary-i386/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQTx5Z217vJm6yaE1OezsTCmKKJ2OwUCarlG/AAKCRCzsTCmKKJ2
+O5OIAQD3Ee5Ynz3JJk24ONt2fsi2h1kwBYXXMwWqE1xR1tscPwEAvykzfR9zfP9V
+e7D/ODs2Gro/RyhLcXVstPnPDUqcIgw=
+=8AtG
+-----END PGP SIGNATURE-----
