@@ -1,0 +1,8 @@
+[show-folder-size-nautilus]
+name=Total Size column for GNOME Files
+baseurl=https://doggylover314.github.io/show-folder-size-nautilus/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://doggylover314.github.io/show-folder-size-nautilus/rpm/RPM-GPG-KEY-show-folder-size-nautilus
+metadata_expire=6h
