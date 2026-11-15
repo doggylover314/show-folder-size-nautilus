@@ -8,7 +8,7 @@ Sizes are computed on background threads and cached on disk, so browsing never
 blocks and a folder measured once stays instant across restarts. While a
 folder is being measured the column reads `Calculating...`.
 
-> **Status: v1.1.2.** Install the `.deb` or the `.rpm` by double-clicking it,
+> **Status: v1.1.3.** Install the `.deb` or the `.rpm` by double-clicking it,
 > run `nautilus -q`, and the column is there — it enables itself on first
 > load. Measurement uses the same GIO call as Nautilus' Properties window, and
 > sizes are formatted exactly like the built-in Size column. **Clicking the
@@ -529,7 +529,18 @@ directory inside it, **if its whole tree has at most 32 directories**
 a big tree is where one watch per directory would spend the inotify budget
 fastest. Linux has no recursive watch, so this is the compromise: a big
 folder is watched at its top level only, and a change further down it shows
-up the next time its own mtime changes, or on `Ctrl+R`.
+up when the folder is next shown.
+
+The folder you are *viewing* is watched too, so deleting files in a folder
+you opened from the sidebar or a bookmark updates the totals of every folder
+above it.
+
+A cached size is never trusted for a whole session. The first time a folder
+appears after Nautilus starts, its saved size is shown at once and
+re-measured in the background; after that it is re-measured whenever it is
+shown again more than 30 seconds later (longer for folders that are slow to
+measure). So restarting Nautilus, going back to a folder, or `Ctrl+R` fixes
+any total that went stale while nothing was watching.
 
 When something changes, the total for that directory **and every ancestor**
 is marked out of date, and any of them that is on screen is re-measured. The
@@ -583,7 +594,8 @@ under the GIL, this is as close as it gets.
 - **Changes deep inside a big folder are only caught at its top level.**
   Folders with at most 32 directories are watched all the way down; bigger
   ones are not, to save the inotify budget. See
-  [Filesystem monitoring](#filesystem-monitoring). `Ctrl+R` forces a recount.
+  [Filesystem monitoring](#filesystem-monitoring). They are picked up when
+  the folder is next shown, or on `Ctrl+R`.
 - **Sorting can leave the list scrolled a few rows down.** Click any column
   header, built-in ones included, and Nautilus keeps its invisibly focused
   row in view, which is the first row of the *previous* order. It happens

@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-11-15
+
+### Fixed
+- Totals that stayed wrong after deleting files, even across restarts. A
+  saved size is now re-checked the first time a folder is shown in each
+  session, and again when it is shown after 30 seconds or more.
+- Deleting files in a folder opened from the sidebar or a bookmark now
+  updates the totals of the folders above it.
+
 ## [1.1.2] - 2026-09-27
 
 ### Added

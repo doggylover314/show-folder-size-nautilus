@@ -184,9 +184,10 @@ KNOWN LIMITATIONS (by design, called out so they don't surprise you)
   `gsettings reset org.gnome.nautilus.list-view default-visible-columns`.
 * Deep changes inside a BIG folder (more than DEEP_SCAN_LIMIT directories)
   are only noticed at its top level.  Change a file two levels below such a
-  folder and its total stays as it was until the folder's own mtime changes.
-  Reload the window (Ctrl+R) to force a recount.  Small folders are watched
-  all the way down and update on their own.
+  folder and its total is not updated live.  It is re-measured when next
+  shown (see REVALIDATE_MIN_S), so going back to it or pressing Ctrl+R after
+  30 seconds recounts it.  Small folders are watched all the way down and
+  update on their own.
 * Clicking any column header, not only this one, can leave the list scrolled
   a few rows down instead of at the top.  That is Nautilus, with or without
   this extension: after a sort it keeps its invisibly focused row in view,
@@ -357,7 +358,7 @@ if NAUTILUS_ABI is None:
 
 from gi.repository import Gio, GLib, GObject, Nautilus  # noqa: E402
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 # --- tunables ---------------------------------------------------------------
 
@@ -411,6 +412,17 @@ REFRESH_MAX_MS = 30000
 # while its replacement is measured.  No real directory has this mtime, so it
 # can never be served as a cache hit, and the loader already reads it.
 STALE_MTIME = -1
+# A cached total is trusted for the folder's mtime, and a folder's mtime only
+# moves when its DIRECT contents change.  Delete something two levels down
+# while nothing is watching and the total above it would be served, wrong, for
+# ever -- across restarts, since the cache is on disk.  So a cached total is
+# shown at once but re-measured in the background the first time a folder is
+# shown in each Nautilus session, and again when it is shown after more than
+# REVALIDATE_MIN_S (or REFRESH_COST_FACTOR times its last measurement, if
+# that is longer).  The second bound keeps a big folder from being re-walked
+# on every visit.
+REVALIDATE_MIN_S = 30
+VERIFIED_LIMIT = 100000   # folders whose last check time is remembered (LRU)
 # While any background work is outstanding, the main thread briefly lets go of
 # the GIL this often, for this long, so worker threads can run.  See _pump.
 PUMP_INTERVAL_MS = 20
@@ -1208,6 +1220,9 @@ class ShowFolderSizeColumn(GObject.GObject,
         # is not something Nautilus does by itself.
         self._rows = OrderedDict()      # path -> Nautilus.FileInfo (LRU)
         self._cost = {}                 # path -> seconds its last measure took
+        # path -> monotonic time of its last measurement in THIS session.
+        # Deliberately not saved: a fresh session re-checks what it shows.
+        self._verified = OrderedDict()
         self._refresh_due = set()       # rows to re-measure at the next tick
         self._refresh_id = None
         self._deep = OrderedDict()      # path -> Gio.FileMonitor (LRU)
@@ -1323,6 +1338,14 @@ class ShowFolderSizeColumn(GObject.GObject,
         if not path:
             return "", None, 0
 
+        # Watch the folder being VIEWED, not only the folders shown in it.
+        # Without this, deleting files in a folder opened from the sidebar, a
+        # bookmark or a search changed nothing above it: its parent's total
+        # is keyed by the parent's mtime, which a deletion one level further
+        # down does not move.  With it, the change marks every ancestor
+        # stale, and each is re-measured when next shown.
+        self._watch(os.path.dirname(path))
+
         try:
             info = os.lstat(path)
         except OSError:
@@ -1343,7 +1366,12 @@ class ShowFolderSizeColumn(GObject.GObject,
             self._awaiting_reread.discard(path)
             self._watch(path)
             self._scan_tree(path)
-            return (cell_value(cached[1]) if cached[1] >= 0 else ""), None, 0
+            text = cell_value(cached[1]) if cached[1] >= 0 else ""
+            # Show it now, and if it has not been checked lately, check it.
+            # See REVALIDATE_MIN_S for why the mtime alone is not enough.
+            if self._due_for_check(path):
+                return text, path, mtime_ns
+            return text, None, 0
 
         # Out of date.  If there is an older total, keep showing it while the
         # new one is measured, rather than flipping to "Calculating...".  The
@@ -1354,6 +1382,21 @@ class ShowFolderSizeColumn(GObject.GObject,
         if cached is not None and cached[1] >= 0:
             return cell_value(cached[1]), path, mtime_ns
         return cell_value(0, PENDING_TEXT), path, mtime_ns
+
+    def _due_for_check(self, path):
+        """True if a cached total should be re-measured before it is trusted.
+
+        Never checked in this session: yes, whatever the cache says.  Checked
+        before: once REVALIDATE_MIN_S has passed, or REFRESH_COST_FACTOR times
+        its last measurement for a folder slow to measure.  A re-ask that only
+        answers our own nudge lands inside that window and costs nothing.
+        """
+        checked = self._verified.get(path)
+        if checked is None:
+            return True
+        interval = max(REVALIDATE_MIN_S,
+                       self._cost.get(path, 0.0) * REFRESH_COST_FACTOR)
+        return time.monotonic() - checked > interval
 
     def _remember_row(self, path, file_info):
         """Hold on to the FileInfo for a folder shown as a row, LRU-bounded.
@@ -1566,6 +1609,10 @@ class ShowFolderSizeColumn(GObject.GObject,
         """Main thread: cache the answer, then get Nautilus to re-read it."""
         if path in self._rows:
             self._cost[path] = seconds
+        self._verified[path] = time.monotonic()
+        self._verified.move_to_end(path)
+        while len(self._verified) > VERIFIED_LIMIT:
+            self._verified.popitem(last=False)
         self._cache[path] = (mtime_ns, num_bytes)
         self._cache.move_to_end(path)
         self._dirty_shards.add(shard_for(path))

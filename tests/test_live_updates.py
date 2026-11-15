@@ -166,11 +166,13 @@ print("\n_resolve -- what the cell shows:")
 with tempfile.TemporaryDirectory() as folder:
     mtime = os.lstat(folder).st_mtime_ns
 
-    def resolve(cache):
+    def resolve(cache, verified=None, cost=None):
         st = Stand(_cache=OrderedDict(cache), _awaiting_reread=set(),
-                   _rows=OrderedDict(), _cost={}, _scanned=set(),
-                   _watch=lambda p: None, _scan_tree=lambda p: None)
-        bind(st, "_remember_row")
+                   _rows=OrderedDict(), _cost=dict(cost or {}),
+                   _scanned=set(), _verified=OrderedDict(verified or {}),
+                   watched=[], _scan_tree=lambda p: None)
+        st._watch = st.watched.append
+        bind(st, "_remember_row", "_due_for_check")
         text, path, _mtime = Col._resolve(st, Info(folder))
         return m.visible_text(text), path is not None, st
 
@@ -191,9 +193,31 @@ with tempfile.TemporaryDirectory() as folder:
     check("a stale FAILED entry has no size to show: Calculating...",
           (text, queued), (m.PENDING_TEXT, True))
 
-    text, queued, _st = resolve({folder: (mtime, 9_000_000)})
-    check("current: the size, and nothing queued",
+    # The bug: delete files two levels down while nothing watches, and the
+    # folder's own mtime does not move.  A saved total for that mtime used to
+    # be served for ever, restart or not.
+    text, queued, st = resolve({folder: (mtime, 9_000_000)})
+    check("saved size, not yet checked this session: shown AND re-measured",
+          (text, queued), (m.format_size(9_000_000), True))
+    check("... and the folder being viewed is watched, not only the row",
+          os.path.dirname(folder) in st.watched, True)
+
+    now = m.time.monotonic()
+    text, queued, _st = resolve({folder: (mtime, 9_000_000)},
+                                verified={folder: now - 1})
+    check("checked a moment ago (e.g. our own nudge): nothing queued",
           (text, queued), (m.format_size(9_000_000), False))
+
+    text, queued, _st = resolve({folder: (mtime, 9_000_000)},
+                                verified={folder: now - m.REVALIDATE_MIN_S - 1})
+    check("shown again after REVALIDATE_MIN_S: re-measured",
+          queued, True)
+
+    text, queued, _st = resolve({folder: (mtime, 9_000_000)},
+                                verified={folder: now - m.REVALIDATE_MIN_S - 1},
+                                cost={folder: m.REVALIDATE_MIN_S})
+    check("a slow folder waits REFRESH_COST_FACTOR x its cost instead",
+          queued, False)
 
 
 # --- 4. a change on disk ----------------------------------------------------
@@ -236,6 +260,15 @@ check("... and its parent is marked stale, not dropped",
       st._cache.get("/h/X"), (m.STALE_MTIME, 100))
 check("... and the deleted folder itself is not asked to refresh",
       "/h/X/gone" in st.refreshed, False)
+
+# Deleting in a folder opened from the sidebar: no row watch covers it, only
+# the watch on the folder being viewed, and the event names the deleted file.
+st = fs_stand({"/h/A": (1, 500), "/h/A/B": (2, 300), "/h": (3, 900)},
+              rows=["/h/A"])
+Col._on_fs_change(st, None, Changed("/h/A/B/C/old.iso"), None, EV.MOVED_OUT)
+check("a file moved out (to the trash) marks every ancestor stale",
+      [st._cache[p][0] for p in ("/h/A/B", "/h/A", "/h")],
+      [m.STALE_MTIME] * 3)
 
 st = fs_stand({"/h/X": (1, 100)}, rows=["/h/X"])
 Col._on_fs_change(st, None, Changed("/h/X/f"), None, EV.CHANGES_DONE_HINT)
@@ -337,6 +370,15 @@ st = Stand(**{**idle, "_jobs": {"/x": []}}, _pump_id=99)
 bind(st, "_busy")
 check("busy: the pump keeps going", Col._pump(st), GLib.SOURCE_CONTINUE)
 
+
+print("\n_on_result -- a measurement counts as this session's check:")
+st = Stand(_rows=OrderedDict(), _cost={}, _verified=OrderedDict(),
+           _cache=OrderedDict(), _dirty_shards=set(), _queued_at={},
+           _requeues={}, _jobs={}, _awaiting_reread=set(),
+           _schedule_save=lambda: None, _watch=lambda p: None)
+Col._on_result(st, "/h/X", 5, 1234)
+check("the folder is recorded as checked", "/h/X" in st._verified, True)
+check("... with the result cached", st._cache["/h/X"], (5, 1234))
 
 print("\n%d failure(s)" % len(fails))
 for line in fails:
